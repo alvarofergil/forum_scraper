@@ -1,0 +1,43 @@
+source:
+  type: armas_es
+  base_url: "https://www.armas.es"
+  forum_id: 96
+
+bootstrap:
+  pages: 10
+
+discovery:
+  overlap_minutes: 30
+  max_pages_per_run: 50
+
+favorites:
+  check_every_run: true
+  unavailable_confirmation_runs: 2
+
+scraping:
+  request_delay_seconds: 2
+  timeout_seconds: 20
+  max_retries: 3
+  user_agent: "PersonalForumMonitor/1.0"
+
+ai:
+  enabled: true
+  model: null
+  match_confidence_threshold: 0.85
+
+notifications:
+  email_enabled: true
+  notify_event_types:
+    - NEW_FAVORITE
+    - PRICE_CHANGED
+    - STATUS_CHANGED
+    - BECAME_UNAVAILABLE
+
+debug:
+  save_failed_html: false
+
+watchlist:
+  - id: item_001
+    brand: "Marca A"
+    model: "Modelo X"
+    aliases: []
