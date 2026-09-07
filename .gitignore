@@ -157,6 +157,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Forum Scraper runtime state
+config/config.yaml
+data/*
+!data/.gitkeep
+backups/*
+!backups/.gitkeep
+
 # Spyder project settings
 .spyderproject
 .spyproject
