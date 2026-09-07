@@ -10,19 +10,24 @@ por email.
 
 ## Estado Actual
 
-Proyecto en fase inicial.
+Proyecto en fase inicial, con el nucleo tecnico de HITO-01 completado y endurecido.
 
-Ya existe el scaffold Python basico:
+Ya existe:
 
 - layout `src/`;
 - paquete principal `app`;
 - paquetes previstos para fuentes, discovery, clasificacion, favoritos, eventos,
   notificaciones y almacenamiento;
+- carga y validacion de configuracion YAML;
+- modelos de dominio base;
+- SQLite con SQLAlchemy, Alembic y PRAGMAs requeridos;
+- URLs canonicas y cliente HTTP secuencial para `armas_es`;
+- persistencia UTC, eventos/candidatos idempotentes y tests sin red;
 - pytest y Ruff configurados;
-- smoke test de importacion.
+- cobertura unitaria de la base tecnica.
 
-La logica de scraping, persistencia, clasificacion, notificaciones y Docker se implementara
-por tareas incrementales siguiendo las SPECs del proyecto.
+Los parsers HTML, discovery, favoritos de negocio, clasificacion, notificaciones y Docker se
+implementaran por tareas incrementales siguiendo las SPECs del proyecto.
 
 ## Principios
 

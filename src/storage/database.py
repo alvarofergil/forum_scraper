@@ -64,7 +64,13 @@ def run_migrations(database_path: str | Path = DEFAULT_DATABASE_PATH) -> None:
     config = Config(PROJECT_ROOT / "alembic.ini")
     config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", sqlite_url(database_path))
-    command.upgrade(config, "head")
+    engine = create_sqlite_engine(database_path)
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+    finally:
+        engine.dispose()
 
 
 def _configure_sqlite_pragmas(engine: Engine) -> None:

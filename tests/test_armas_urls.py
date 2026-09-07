@@ -28,6 +28,13 @@ def test_relative_url_is_resolved_before_normalization() -> None:
     assert normalize_topic_url(url) == "https://www.armas.es/foros/viewtopic.php?f=96&t=12345"
 
 
+def test_external_absolute_url_with_topic_id_is_rejected() -> None:
+    url = "https://example.invalid/foros/viewtopic.php?f=96&t=12345"
+
+    with pytest.raises(ArmasUrlError, match="host"):
+        normalize_topic_url(url)
+
+
 def test_forum_url_can_be_resolved_from_relative_path() -> None:
     url = "viewforum.php?f=96&start=18"
 
@@ -48,3 +55,8 @@ def test_url_without_topic_id_fails_explicitly() -> None:
 def test_blank_topic_id_fails_explicitly() -> None:
     with pytest.raises(ArmasUrlError, match="missing topic id"):
         canonical_topic_url(" ")
+
+
+def test_invalid_base_url_scheme_fails_explicitly() -> None:
+    with pytest.raises(ArmasUrlError, match="base_url"):
+        canonical_topic_url("12345", base_url="ftp://www.armas.es")

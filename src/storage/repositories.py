@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models import CandidateStatus, EventType, NotificationStatus, TopicListing, utc_now
 from storage.orm import AppStateORM, CandidateMatchORM, EventORM, TopicORM
+from storage.types import JsonPayload
 
 
 class TopicRepository:
@@ -31,13 +32,20 @@ class TopicRepository:
 
         topic.canonical_url = listing.canonical_url
         topic.title = listing.title
-        topic.snippet = listing.snippet
-        topic.author = listing.author
-        topic.created_at = listing.created_at
-        topic.last_activity_at = listing.last_activity_at
-        topic.last_post_author = listing.last_post_author
-        topic.reply_count = listing.reply_count
-        topic.view_count = listing.view_count
+        if listing.snippet is not None:
+            topic.snippet = listing.snippet
+        if listing.author is not None:
+            topic.author = listing.author
+        if listing.created_at is not None:
+            topic.created_at = listing.created_at
+        if listing.last_activity_at is not None:
+            topic.last_activity_at = listing.last_activity_at
+        if listing.last_post_author is not None:
+            topic.last_post_author = listing.last_post_author
+        if listing.reply_count is not None:
+            topic.reply_count = listing.reply_count
+        if listing.view_count is not None:
+            topic.view_count = listing.view_count
         topic.updated_at = utc_now()
         return topic
 
@@ -64,6 +72,30 @@ class CandidateMatchRepository:
         self.session.add(candidate)
         return candidate
 
+    def get_or_create_pending(
+        self,
+        *,
+        topic_id: int,
+        watch_item_id: str,
+        confidence: float | None = None,
+    ) -> tuple[CandidateMatchORM, bool]:
+        existing = self.session.scalar(
+            select(CandidateMatchORM).where(
+                CandidateMatchORM.topic_id == topic_id,
+                CandidateMatchORM.watch_item_id == watch_item_id,
+            )
+        )
+        if existing is not None:
+            return existing, False
+
+        candidate = self.create_pending(
+            topic_id=topic_id,
+            watch_item_id=watch_item_id,
+            confidence=confidence,
+        )
+        self.session.flush()
+        return candidate, True
+
 
 class EventRepository:
     """Persistence helpers for deduplicated events."""
@@ -79,6 +111,7 @@ class EventRepository:
         topic_id: int | None = None,
         favorite_id: int | None = None,
         watch_item_id: str | None = None,
+        payload: JsonPayload | None = None,
     ) -> tuple[EventORM, bool]:
         existing = self.session.scalar(
             select(EventORM).where(EventORM.deduplication_key == deduplication_key)
@@ -92,6 +125,7 @@ class EventRepository:
             topic_id=topic_id,
             favorite_id=favorite_id,
             watch_item_id=watch_item_id,
+            payload_json=payload,
             notification_status=NotificationStatus.PENDING.value,
         )
         self.session.add(event)

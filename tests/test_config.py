@@ -111,6 +111,26 @@ watchlist:
         load_config(config_path)
 
 
+@pytest.mark.parametrize("base_url", ["not-a-url", "www.armas.es", "ftp://www.armas.es"])
+def test_source_base_url_must_be_absolute_http_url(tmp_path: Path, base_url: str) -> None:
+    config_path = write_config(
+        tmp_path,
+        f"""
+source:
+  type: armas_es
+  base_url: "{base_url}"
+  forum_id: 96
+watchlist:
+  - id: item_001
+    brand: "Marca A"
+    model: "Modelo X"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="source.base_url"):
+        load_config(config_path)
+
+
 def test_unknown_notification_event_type_is_rejected(tmp_path: Path) -> None:
     config_path = write_config(
         tmp_path,
