@@ -1,5 +1,4 @@
 """Classification interfaces and adapters."""
-"""Classification interfaces and adapters."""
 
 from classification.base import (
     ClassificationContext,
