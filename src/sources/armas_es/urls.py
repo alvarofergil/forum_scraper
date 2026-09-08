@@ -25,6 +25,7 @@ def extract_topic_id(url: str, *, base_url: str = DEFAULT_BASE_URL) -> str:
     """Extract the phpBB topic identity from query parameter `t`."""
 
     resolved_url = resolve_forum_url(url, base_url=base_url)
+    _require_same_host(resolved_url, base_url)
     query = parse_qs(urlsplit(resolved_url).query, keep_blank_values=True)
     topic_ids = query.get("t", [])
     topic_id = topic_ids[0].strip() if topic_ids else ""
@@ -67,9 +68,16 @@ def normalize_topic_url(
 def _normalized_base(base_url: str) -> str:
     value = _require_url(base_url).rstrip("/")
     parts = urlsplit(value)
-    if not parts.scheme or not parts.netloc:
-        raise ArmasUrlError("base_url must be absolute")
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ArmasUrlError("base_url must be an absolute HTTP(S) URL")
     return f"{value}{FORUM_PATH}"
+
+
+def _require_same_host(url: str, base_url: str) -> None:
+    url_host = urlsplit(url).netloc.lower()
+    base_host = urlsplit(_require_url(base_url)).netloc.lower()
+    if url_host != base_host:
+        raise ArmasUrlError("topic URL host must match configured base_url")
 
 
 def _require_url(url: str) -> str:

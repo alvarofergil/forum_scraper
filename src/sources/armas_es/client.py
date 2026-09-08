@@ -38,6 +38,18 @@ class ArmasHttpStatusError(ArmasHttpClientError):
         self.url = url
 
 
+class ArmasHttpTransientError(ArmasHttpStatusError):
+    """Raised when a transient HTTP status remains after all retries."""
+
+
+class ArmasTopicNotFoundError(ArmasHttpStatusError):
+    """Raised when a topic URL returns not found."""
+
+
+class ArmasTopicUnavailableError(ArmasHttpStatusError):
+    """Raised when a topic is unavailable or no longer viable."""
+
+
 class ArmasBlockedError(ArmasHttpStatusError):
     """Raised when the site returns an explicit blocking/authorization status."""
 
@@ -204,6 +216,12 @@ class ArmasEsClient:
         status_code = response.status_code
         if 200 <= status_code < 300:
             return response
+        if status_code == 404:
+            raise ArmasTopicNotFoundError(status_code, requested_url)
+        if status_code == 410:
+            raise ArmasTopicUnavailableError(status_code, requested_url)
+        if status_code in TRANSIENT_STATUS_CODES:
+            raise ArmasHttpTransientError(status_code, requested_url)
         raise ArmasHttpStatusError(status_code, requested_url)
 
 

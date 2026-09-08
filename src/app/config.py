@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -172,7 +173,7 @@ def _parse_source(data: Mapping[str, Any]) -> SourceConfig:
 
     return SourceConfig(
         type=source_type,
-        base_url=_string(data, "base_url", "source.base_url"),
+        base_url=_absolute_http_url(data, "base_url", "source.base_url"),
         forum_id=_positive_int(data.get("forum_id"), "source.forum_id"),
     )
 
@@ -344,6 +345,14 @@ def _string_value(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{path} must be a non-empty string")
     return value.strip()
+
+
+def _absolute_http_url(data: Mapping[str, Any], key: str, path: str) -> str:
+    value = _string(data, key, path)
+    parts = urlsplit(value)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ConfigError(f"{path} must be an absolute HTTP(S) URL")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
 def _bool(value: object, path: str) -> bool:

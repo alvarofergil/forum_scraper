@@ -6,8 +6,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -18,6 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.models import AvailabilityStatus, CandidateStatus, NotificationStatus, utc_now
+from storage.types import JsonPayload, JSONPayloadType, UTCDateTime
 
 
 class Base(DeclarativeBase):
@@ -35,14 +36,14 @@ class TopicORM(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     snippet: Mapped[str | None] = mapped_column(String(1000))
     author: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_activity_at: Mapped[datetime | None] = mapped_column(UTCDateTime, index=True)
     last_post_author: Mapped[str | None] = mapped_column(String(255))
     reply_count: Mapped[int | None] = mapped_column(Integer)
     view_count: Mapped[int | None] = mapped_column(Integer)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         default=utc_now,
         onupdate=utc_now,
     )
@@ -83,8 +84,8 @@ class CandidateMatchORM(Base):
         default=CandidateStatus.PENDING.value,
     )
     confidence: Mapped[float | None] = mapped_column(Float)
-    matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    matched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    classified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
     topic: Mapped[TopicORM] = relationship(back_populates="candidate_matches")
 
@@ -118,11 +119,15 @@ class FavoriteORM(Base):
     )
     current_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str | None] = mapped_column(String(3))
-    price_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    price_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_content_hash: Mapped[str | None] = mapped_column(String(128))
+    last_classified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     unavailable_confirmation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         default=utc_now,
         onupdate=utc_now,
     )
@@ -152,7 +157,7 @@ class PriceHistoryORM(Base):
     )
     price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str | None] = mapped_column(String(3))
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
     source_hash: Mapped[str | None] = mapped_column(String(128))
 
     favorite: Mapped[FavoriteORM] = relationship(back_populates="price_history")
@@ -176,7 +181,7 @@ class StatusHistoryORM(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
     favorite: Mapped[FavoriteORM] = relationship(back_populates="status_history")
 
@@ -198,9 +203,9 @@ class TopicPostORM(Base):
     external_post_id: Mapped[str | None] = mapped_column(String(64))
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     author: Mapped[str | None] = mapped_column(String(255))
-    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    posted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
     topic: Mapped[TopicORM] = relationship(back_populates="posts")
 
@@ -227,17 +232,18 @@ class EventORM(Base):
     topic_id: Mapped[int | None] = mapped_column(ForeignKey("topics.id", ondelete="SET NULL"))
     favorite_id: Mapped[int | None] = mapped_column(ForeignKey("favorites.id", ondelete="SET NULL"))
     watch_item_id: Mapped[str | None] = mapped_column(String(255))
+    payload_json: Mapped[JsonPayload | None] = mapped_column(JSONPayloadType)
     notification_status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
         default=NotificationStatus.PENDING.value,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         default=utc_now,
         index=True,
     )
-    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     error_message: Mapped[str | None] = mapped_column(String(1000))
 
     topic: Mapped[TopicORM | None] = relationship(back_populates="events")
@@ -252,7 +258,7 @@ class AppStateORM(Base):
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     value: Mapped[str] = mapped_column(String(1000), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime,
         default=utc_now,
         onupdate=utc_now,
     )

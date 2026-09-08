@@ -7,7 +7,9 @@ from sources.armas_es.client import (
     ArmasBlockedError,
     ArmasEsClient,
     ArmasHttpResponse,
-    ArmasHttpStatusError,
+    ArmasHttpTransientError,
+    ArmasTopicNotFoundError,
+    ArmasTopicUnavailableError,
     ArmasTransportError,
 )
 
@@ -131,7 +133,7 @@ def test_retries_are_bounded() -> None:
         max_retries=2,
     )
 
-    with pytest.raises(ArmasHttpStatusError, match="HTTP 503"):
+    with pytest.raises(ArmasHttpTransientError, match="HTTP 503"):
         client.get_listing_page()
 
     assert len(transport.calls) == 3
@@ -171,8 +173,20 @@ def test_non_transient_http_error_is_not_retried() -> None:
     )
     client = ArmasEsClient(transport=transport, request_delay_seconds=0, max_retries=3)
 
-    with pytest.raises(ArmasHttpStatusError, match="HTTP 404"):
+    with pytest.raises(ArmasTopicNotFoundError, match="HTTP 404"):
         client.get_listing_page()
+
+    assert len(transport.calls) == 1
+
+
+def test_topic_unavailable_status_is_distinguishable() -> None:
+    transport = FakeTransport(
+        ArmasHttpResponse(status_code=410, text="gone", final_url="https://example.invalid")
+    )
+    client = ArmasEsClient(transport=transport, request_delay_seconds=0, max_retries=3)
+
+    with pytest.raises(ArmasTopicUnavailableError, match="HTTP 410"):
+        client.get_topic("12345")
 
     assert len(transport.calls) == 1
 
