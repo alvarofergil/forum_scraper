@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import FavoritesConfig
+from app.config import AiConfig, FavoritesConfig
 from app.models import (
     AvailabilityStatus,
     EventType,
@@ -23,13 +22,12 @@ from app.models import (
 from classification.base import ClassificationResult, ListingClassifier, PreviousFavoriteState
 from discovery.matcher import normalize_text
 from events.service import EventService
-from sources.armas_es.client import (
-    ArmasEsClient,
-    ArmasHttpClientError,
-    ArmasTopicNotFoundError,
-    ArmasTopicUnavailableError,
+from sources.base import (
+    TopicFetcher,
+    TopicFetchNotFoundError,
+    TopicFetchRecoverableError,
+    TopicFetchUnavailableError,
 )
-from sources.armas_es.topic_parser import parse_topic_page
 from storage.orm import (
     FavoriteORM,
     PriceHistoryORM,
@@ -37,9 +35,6 @@ from storage.orm import (
     TopicORM,
     TopicPostORM,
 )
-
-
-TopicParser = Callable[[str], ParsedTopic]
 
 
 def post_content_hash(external_topic_id: str, post: TopicPost) -> str:
@@ -74,17 +69,17 @@ class FavoriteService:
         self,
         session: Session,
         *,
-        client: ArmasEsClient | None = None,
+        topic_fetcher: TopicFetcher | None = None,
         classifier: ListingClassifier | None = None,
-        parser: TopicParser = parse_topic_page,
         config: FavoritesConfig | None = None,
+        ai_config: AiConfig | None = None,
         events: EventService | None = None,
     ) -> None:
         self.session = session
-        self.client = client
+        self.topic_fetcher = topic_fetcher
         self.classifier = classifier
-        self.parser = parser
         self.config = config or FavoritesConfig()
+        self.ai_config = ai_config or AiConfig()
         self.events = events or EventService(session)
 
     def create_from_classification(
@@ -93,14 +88,17 @@ class FavoriteService:
         watch_item: WatchItem,
         topic: ParsedTopic,
         result: ClassificationResult,
+        canonical_url: str,
     ) -> tuple[FavoriteORM | None, bool]:
         """Create a favorite when classification confirms a relevant offer."""
 
-        if not _is_positive_offer(result):
+        if not _is_positive_offer(result, self.ai_config.match_confidence_threshold):
             return None, False
 
-        topic_row = self._get_or_create_topic(topic)
-        existing = self.session.scalar(select(FavoriteORM).where(FavoriteORM.topic_id == topic_row.id))
+        topic_row = self._get_or_create_topic(topic, canonical_url=canonical_url)
+        existing = self.session.scalar(
+            select(FavoriteORM).where(FavoriteORM.topic_id == topic_row.id)
+        )
         if existing is not None:
             return existing, False
 
@@ -134,7 +132,11 @@ class FavoriteService:
                 "topic_external_id": topic.external_topic_id,
                 "watch_item_id": watch_item.id,
                 "availability": favorite.status,
-                "price": float(favorite.current_price) if favorite.current_price is not None else None,
+                "price": (
+                    float(favorite.current_price)
+                    if favorite.current_price is not None
+                    else None
+                ),
                 "currency": favorite.currency,
             },
         )
@@ -146,18 +148,20 @@ class FavoriteService:
         favorite = self.session.get(FavoriteORM, favorite_id)
         if favorite is None or favorite.topic is None or not favorite.is_active:
             return False
-        if self.client is None or self.classifier is None:
-            raise ValueError("client and classifier are required to check favorites")
+        if self.topic_fetcher is None or self.classifier is None:
+            raise ValueError("topic_fetcher and classifier are required to check favorites")
 
         try:
-            response = self.client.get_topic(favorite.topic.external_topic_id)
-        except (ArmasTopicNotFoundError, ArmasTopicUnavailableError):
+            parsed_topic = self.topic_fetcher.fetch_topic(
+                external_topic_id=favorite.topic.external_topic_id,
+                canonical_url=favorite.topic.canonical_url,
+            )
+        except (TopicFetchNotFoundError, TopicFetchUnavailableError):
             return self._record_unavailable_attempt(favorite)
-        except ArmasHttpClientError:
+        except TopicFetchRecoverableError:
             favorite.last_checked_at = utc_now()
             return False
 
-        parsed_topic = self.parser(response.text)
         content_hash = compute_content_hash(parsed_topic)
         favorite.last_checked_at = utc_now()
         favorite.unavailable_confirmation_count = 0
@@ -175,17 +179,18 @@ class FavoriteService:
         self._apply_classification_update(favorite, parsed_topic, result, content_hash)
         return True
 
-    def _get_or_create_topic(self, topic: ParsedTopic) -> TopicORM:
+    def _get_or_create_topic(self, topic: ParsedTopic, *, canonical_url: str) -> TopicORM:
         existing = self.session.scalar(
             select(TopicORM).where(TopicORM.external_topic_id == topic.external_topic_id)
         )
         if existing is not None:
             existing.title = topic.topic_title
+            existing.canonical_url = canonical_url
             return existing
 
         row = TopicORM(
             external_topic_id=topic.external_topic_id,
-            canonical_url=f"https://www.armas.es/foros/viewtopic.php?f=96&t={topic.external_topic_id}",
+            canonical_url=canonical_url,
             title=topic.topic_title,
             author=topic.original_author,
         )
@@ -330,8 +335,12 @@ class FavoriteService:
         self.session.add(StatusHistoryORM(favorite_id=favorite.id, status=favorite.status))
 
 
-def _is_positive_offer(result: ClassificationResult) -> bool:
-    return result.matches_watch_item and result.listing_type == ListingType.OFFER
+def _is_positive_offer(result: ClassificationResult, threshold: float) -> bool:
+    return (
+        result.matches_watch_item
+        and result.listing_type == ListingType.OFFER
+        and result.confidence >= threshold
+    )
 
 
 def _price_decimal(value: float | None) -> Decimal | None:

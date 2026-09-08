@@ -54,6 +54,31 @@ def canonical_topic_url(
     return urlunsplit((base.scheme, base.netloc, TOPIC_PATH, query, ""))
 
 
+def canonical_topic_page_url(
+    topic_id: str | int,
+    *,
+    start: int = 0,
+    base_url: str = DEFAULT_BASE_URL,
+    forum_id: int = DEFAULT_FORUM_ID,
+) -> str:
+    """Build a canonical topic URL for a specific phpBB pagination offset."""
+
+    if start < 0:
+        raise ArmasUrlError("start must be non-negative")
+    normalized_topic_id = str(topic_id).strip()
+    if not normalized_topic_id:
+        raise ArmasUrlError("missing topic id")
+    if forum_id <= 0:
+        raise ArmasUrlError("forum_id must be positive")
+
+    query: dict[str, str | int] = {"f": forum_id, "t": normalized_topic_id}
+    if start:
+        query["start"] = start
+
+    base = urlsplit(_normalized_base(base_url))
+    return urlunsplit((base.scheme, base.netloc, TOPIC_PATH, urlencode(query), ""))
+
+
 def normalize_topic_url(
     url: str,
     *,

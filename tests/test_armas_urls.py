@@ -2,6 +2,7 @@ import pytest
 
 from sources.armas_es.urls import (
     ArmasUrlError,
+    canonical_topic_page_url,
     canonical_topic_url,
     extract_topic_id,
     normalize_listing_page_url,
@@ -68,6 +69,20 @@ def test_canonical_topic_url_uses_configured_forum_id() -> None:
     assert canonical_topic_url("12345", forum_id=99) == (
         "https://www.armas.es/foros/viewtopic.php?f=99&t=12345"
     )
+
+
+def test_canonical_topic_page_url_adds_start_only_for_later_pages() -> None:
+    assert canonical_topic_page_url("12345", start=0) == (
+        "https://www.armas.es/foros/viewtopic.php?f=96&t=12345"
+    )
+    assert canonical_topic_page_url("12345", start=18) == (
+        "https://www.armas.es/foros/viewtopic.php?f=96&t=12345&start=18"
+    )
+
+
+def test_canonical_topic_page_url_rejects_negative_start() -> None:
+    with pytest.raises(ArmasUrlError, match="start"):
+        canonical_topic_page_url("12345", start=-1)
 
 
 def test_url_without_topic_id_fails_explicitly() -> None:

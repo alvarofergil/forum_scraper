@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 
+from alembic import command
 from app.models import EventType, NotificationStatus
 from events.service import EventService, build_deduplication_key, stable_payload
 from storage import create_sqlite_engine, session_factory, session_scope
