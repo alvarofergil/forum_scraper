@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from alembic.config import Config
+
+from alembic import command
+from app.config import (
+    AiConfig,
+    AppConfig,
+    BootstrapConfig,
+    DebugConfig,
+    DiscoveryConfig,
+    FavoritesConfig,
+    NotificationsConfig,
+    ScrapingConfig,
+    SourceConfig,
+)
+from app.models import (
+    AvailabilityStatus,
+    ListingType,
+    ParsedTopic,
+    TopicListing,
+    TopicPost,
+    WatchItem,
+)
+from classification.base import ClassificationResult
+from classification.fake import FakeClassifier
+from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
+from sources.armas_es.client import ArmasHttpResponse
+from storage import create_sqlite_engine, session_factory, session_scope
+from storage.orm import CandidateMatchORM, FavoriteORM, PriceHistoryORM, TopicORM
+from storage.repositories import AppStateRepository
+
+
+def migrated_db_path(tmp_path: Path) -> Path:
+    db_path = tmp_path / "monitor.db"
+    config = Config("alembic.ini")
+    config.set_main_option("script_location", "alembic")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    command.upgrade(config, "head")
+    return db_path
+
+
+class FakeListingClient:
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+
+    def get_listing_page(self, *, start: int = 0) -> ArmasHttpResponse:
+        self.starts.append(start)
+        return ArmasHttpResponse(
+            status_code=200,
+            text=f"listing:{start}",
+            final_url="https://example.test",
+        )
+
+
+class FakeTopicFetcher:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    def fetch_topic(
+        self,
+        *,
+        external_topic_id: str,
+        canonical_url: str | None = None,
+    ) -> ParsedTopic:
+        self.calls.append((external_topic_id, canonical_url))
+        return parsed_topic(external_topic_id=external_topic_id)
+
+
+def watch_item() -> WatchItem:
+    return WatchItem(id="watch-001", brand="Acme", model="Target Pro", aliases=("ATP",))
+
+
+def app_config(
+    *,
+    pages: int = 10,
+    ai_enabled: bool = True,
+    threshold: float = 0.85,
+) -> AppConfig:
+    return AppConfig(
+        source=SourceConfig(type="armas_es", base_url="https://www.armas.es", forum_id=96),
+        bootstrap=BootstrapConfig(pages=pages),
+        discovery=DiscoveryConfig(),
+        favorites=FavoritesConfig(),
+        scraping=ScrapingConfig(request_delay_seconds=0),
+        ai=AiConfig(enabled=ai_enabled, match_confidence_threshold=threshold, model="test-model"),
+        notifications=NotificationsConfig(),
+        debug=DebugConfig(),
+        watchlist=(watch_item(),),
+    )
+
+
+def listing(
+    external_topic_id: str,
+    *,
+    title: str = "Vendo Acme Target Pro",
+) -> TopicListing:
+    return TopicListing(
+        external_topic_id=external_topic_id,
+        canonical_url=f"https://www.armas.es/foros/viewtopic.php?f=96&t={external_topic_id}",
+        title=title,
+        snippet="Oferta revisada",
+        author="seller",
+    )
+
+
+def parsed_topic(*, external_topic_id: str = "100") -> ParsedTopic:
+    return ParsedTopic(
+        topic_title="Vendo Acme Target Pro",
+        external_topic_id=external_topic_id,
+        original_author="seller",
+        total_posts=1,
+        current_page=1,
+        total_pages=1,
+        posts=(
+            TopicPost(
+                sequence_number=1,
+                author="seller",
+                posted_at=datetime(2026, 1, 2, 10, 30, tzinfo=UTC),
+                text="Acme Target Pro por 500 EUR",
+                external_post_id=f"post-{external_topic_id}",
+            ),
+        ),
+    )
+
+
+def positive_result(*, confidence: float = 0.95) -> ClassificationResult:
+    return ClassificationResult(
+        matches_watch_item=True,
+        listing_type=ListingType.OFFER,
+        availability=AvailabilityStatus.AVAILABLE,
+        price=500,
+        currency="EUR",
+        confidence=confidence,
+    )
+
+
+def negative_result() -> ClassificationResult:
+    return ClassificationResult(
+        matches_watch_item=False,
+        listing_type=ListingType.OTHER,
+        availability=AvailabilityStatus.UNKNOWN,
+        confidence=0.2,
+    )
+
+
+def parser_for_pages(pages: dict[int, tuple[TopicListing, ...]]):
+    def parse_listing_page(
+        html: str,
+        *,
+        base_url: str,
+        forum_id: int,
+        current_start: int,
+    ):
+        from sources.armas_es.listing_parser import ParsedListingPage
+
+        return ParsedListingPage(topics=pages.get(current_start, ()))
+
+    return parse_listing_page
+
+
+def service_for(
+    tmp_path: Path,
+    *,
+    pages: dict[int, tuple[TopicListing, ...]],
+    config: AppConfig | None = None,
+    classifier: FakeClassifier | None = None,
+) -> tuple[DiscoveryService, FakeListingClient, FakeTopicFetcher]:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    listing_client = FakeListingClient()
+    topic_fetcher = FakeTopicFetcher()
+    service = DiscoveryService(
+        config=config or app_config(),
+        session_factory=factory,
+        listing_client=listing_client,
+        topic_fetcher=topic_fetcher,
+        classifier=classifier or FakeClassifier(default_result=positive_result()),
+        listing_parser=parser_for_pages(pages),
+    )
+    return service, listing_client, topic_fetcher
+
+
+def test_bootstrap_walks_configured_pages(tmp_path: Path) -> None:
+    service, listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(pages=10),
+        pages={},
+    )
+
+    result = service.bootstrap()
+
+    assert listing_client.starts == [0, 18, 36, 54, 72, 90, 108, 126, 144, 162]
+    assert result.pages_seen == 10
+
+
+def test_bootstrap_opens_only_matched_candidates(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        pages={
+            0: (
+                listing("100", title="Vendo Acme Target Pro"),
+                listing("200", title="Conversacion general"),
+            )
+        },
+    )
+
+    result = service.bootstrap()
+
+    assert topic_fetcher.calls == [
+        ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
+    ]
+    assert result.candidates_seen == 1
+
+
+def test_positive_classification_creates_favorite(tmp_path: Path) -> None:
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+
+    result = service.bootstrap()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_created == 1
+        assert session.query(FavoriteORM).count() == 1
+        assert session.query(PriceHistoryORM).count() == 1
+
+
+def test_negative_classification_does_not_create_favorite(tmp_path: Path) -> None:
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=negative_result()),
+    )
+
+    result = service.bootstrap()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_created == 0
+        assert session.query(FavoriteORM).count() == 0
+        assert session.query(CandidateMatchORM).one().status == "DISCARDED"
+
+
+def test_ai_disabled_stores_pending_candidate_without_opening_topic(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=positive_result())
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+
+    result = service.bootstrap()
+
+    with session_scope(service.session_factory) as session:
+        assert topic_fetcher.calls == []
+        assert classifier.new_candidate_calls == ()
+        assert result.pending_candidates == 1
+        assert session.query(CandidateMatchORM).one().status == "PENDING"
+        assert session.query(FavoriteORM).count() == 0
+
+
+def test_bootstrap_rejects_second_run_without_force(tmp_path: Path) -> None:
+    service, _listing_client, _topic_fetcher = service_for(tmp_path, pages={})
+
+    service.bootstrap()
+
+    with pytest.raises(BootstrapAlreadyCompletedError):
+        service.bootstrap()
+
+
+def test_force_allows_new_pass_without_deleting_history(tmp_path: Path) -> None:
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+
+    service.bootstrap()
+    result = service.bootstrap(force=True)
+
+    with session_scope(service.session_factory) as session:
+        assert result.topics_seen == 1
+        assert session.query(FavoriteORM).count() == 1
+        assert session.query(PriceHistoryORM).count() == 1
+        assert session.query(TopicORM).count() == 1
+        assert AppStateRepository(session).get("bootstrap_completed_at") is not None

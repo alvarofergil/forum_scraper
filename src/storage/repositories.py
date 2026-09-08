@@ -96,6 +96,30 @@ class CandidateMatchRepository:
         self.session.flush()
         return candidate, True
 
+    def mark_classified(
+        self,
+        candidate: CandidateMatchORM,
+        *,
+        confidence: float | None,
+    ) -> None:
+        """Mark a candidate as classified after a successful positive result."""
+
+        candidate.status = CandidateStatus.CLASSIFIED.value
+        candidate.confidence = confidence
+        candidate.classified_at = utc_now()
+
+    def mark_discarded(
+        self,
+        candidate: CandidateMatchORM,
+        *,
+        confidence: float | None,
+    ) -> None:
+        """Mark a candidate as classified but not relevant."""
+
+        candidate.status = CandidateStatus.DISCARDED.value
+        candidate.confidence = confidence
+        candidate.classified_at = utc_now()
+
 
 class EventRepository:
     """Persistence helpers for deduplicated events."""
