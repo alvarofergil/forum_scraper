@@ -29,6 +29,12 @@ implementations.
 - Top and bottom pagination blocks use `div.pagination`.
 - The next page is exposed as `li.next a[rel="next"]` when present.
 - The page-jump input exposes `data-per-page="18"` and `data-start-name="start"`.
+- Listing pagination is page-level data exposed as `ParsedListingPage.next_page_url`;
+  individual `TopicListing` rows do not carry page navigation.
+- `next_page_url` must stay on the configured host, use `/foros/viewforum.php`,
+  match the configured forum id, and keep only the `f` and `start` query
+  parameters. It must omit ephemeral or row-specific values such as `sid`, `p`,
+  and anchors.
 
 ## Topic DOM Signals
 

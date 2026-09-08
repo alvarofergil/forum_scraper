@@ -40,7 +40,6 @@ def test_parse_listing_extracts_metadata_and_canonical_urls() -> None:
     assert topic.last_post_author == "user_009"
     assert topic.reply_count == 19
     assert topic.view_count == 1457
-    assert topic.next_page_url is None
 
 
 def test_parse_listing_detects_next_page_and_removes_session_ids() -> None:
@@ -81,6 +80,126 @@ def test_parse_listing_uses_configurable_start_step_fallback() -> None:
     page = parse_listing_page(html, current_start=36, fallback_page_size=18)
 
     assert page.next_page_url == "https://www.armas.es/foros/viewforum.php?f=96&start=54"
+
+
+def test_parse_listing_fallback_uses_configured_forum_id() -> None:
+    html = """
+    <div id="page-body">
+      <div class="forumbg">
+        <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+        <ul class="topiclist topics"></ul>
+      </div>
+    </div>
+    """
+
+    page = parse_listing_page(
+        html,
+        base_url="https://example.test",
+        forum_id=99,
+        current_start=18,
+        fallback_page_size=18,
+    )
+
+    assert page.next_page_url == "https://example.test/foros/viewforum.php?f=99&start=36"
+
+
+def test_parse_listing_next_page_url_removes_session_post_and_anchor() -> None:
+    html = """
+    <div class="pagination">
+      <ul><li class="next">
+        <a rel="next" href="./viewforum.php?f=96&amp;p=999&amp;start=18&amp;sid=abc#p999">
+          Siguiente
+        </a>
+      </li></ul>
+    </div>
+    <div class="forumbg">
+      <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+      <ul class="topiclist topics"></ul>
+    </div>
+    """
+
+    page = parse_listing_page(html)
+
+    assert page.next_page_url == "https://www.armas.es/foros/viewforum.php?f=96&start=18"
+
+
+def test_parse_listing_external_next_page_url_is_not_returned() -> None:
+    html = """
+    <div class="pagination">
+      <ul><li class="next">
+        <a rel="next" href="https://evil.invalid/foros/viewforum.php?f=96&amp;start=18&amp;sid=abc">
+          Siguiente
+        </a>
+      </li></ul>
+    </div>
+    <div class="forumbg">
+      <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+      <ul class="topiclist topics"></ul>
+    </div>
+    """
+
+    page = parse_listing_page(html)
+
+    assert page.next_page_url is None
+
+
+def test_parse_listing_next_page_url_for_different_path_is_not_returned() -> None:
+    html = """
+    <div class="pagination">
+      <ul><li class="next">
+        <a rel="next" href="./viewtopic.php?f=96&amp;t=123&amp;start=18">Siguiente</a>
+      </li></ul>
+    </div>
+    <div class="forumbg">
+      <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+      <ul class="topiclist topics"></ul>
+    </div>
+    """
+
+    page = parse_listing_page(html)
+
+    assert page.next_page_url is None
+
+
+def test_parse_listing_next_page_url_for_different_forum_is_not_returned() -> None:
+    html = """
+    <div class="pagination">
+      <ul><li class="next">
+        <a rel="next" href="./viewforum.php?f=97&amp;start=18">Siguiente</a>
+      </li></ul>
+    </div>
+    <div class="forumbg">
+      <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+      <ul class="topiclist topics"></ul>
+    </div>
+    """
+
+    page = parse_listing_page(html, forum_id=96)
+
+    assert page.next_page_url is None
+
+
+def test_parse_listing_next_page_url_without_href_is_not_returned() -> None:
+    html = """
+    <div class="pagination">
+      <ul><li class="next"><a rel="next">Siguiente</a></li></ul>
+    </div>
+    <div class="forumbg">
+      <ul class="topiclist"><li class="header"><dl><dt><div>Temas</div></dt></dl></li></ul>
+      <ul class="topiclist topics"></ul>
+    </div>
+    """
+
+    page = parse_listing_page(html)
+
+    assert page.next_page_url is None
+
+
+def test_parse_listing_next_page_url_belongs_to_page_not_topic_rows() -> None:
+    page = parse_listing_page(read_fixture("listing_page_2.html"))
+
+    assert page.next_page_url == "https://www.armas.es/foros/viewforum.php?f=96&start=36"
+    assert all(not hasattr(topic, "next_page_url") for topic in page.topics)
 
 
 def test_parse_listing_raises_parse_error_without_temas_block() -> None:

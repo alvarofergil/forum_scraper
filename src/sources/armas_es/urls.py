@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 DEFAULT_BASE_URL = "https://www.armas.es"
 DEFAULT_FORUM_ID = 96
 FORUM_PATH = "/foros/"
+LISTING_PATH = "/foros/viewforum.php"
 TOPIC_PATH = "/foros/viewtopic.php"
 
 
@@ -65,6 +66,44 @@ def normalize_topic_url(
     return canonical_topic_url(topic_id, base_url=base_url, forum_id=forum_id)
 
 
+def normalize_listing_page_url(
+    url: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    forum_id: int = DEFAULT_FORUM_ID,
+) -> str | None:
+    """Resolve and canonicalize a listing pagination URL when it stays in scope."""
+
+    resolved_url = resolve_forum_url(url, base_url=base_url)
+    if not _has_same_host(resolved_url, base_url):
+        return None
+
+    parts = urlsplit(resolved_url)
+    if parts.path != LISTING_PATH:
+        return None
+
+    query_values = parse_qsl(parts.query, keep_blank_values=True)
+    forum_ids = [value for key, value in query_values if key == "f"]
+    if forum_ids != [str(forum_id)]:
+        return None
+
+    canonical_query = [("f", str(forum_id))]
+    start_values = [value for key, value in query_values if key == "start"]
+    if start_values:
+        if len(start_values) != 1:
+            return None
+        try:
+            start = int(start_values[0])
+        except ValueError:
+            return None
+        if start < 0:
+            return None
+        canonical_query.append(("start", str(start)))
+
+    base = urlsplit(_normalized_base(base_url))
+    return urlunsplit((base.scheme, base.netloc, LISTING_PATH, urlencode(canonical_query), ""))
+
+
 def _normalized_base(base_url: str) -> str:
     value = _require_url(base_url).rstrip("/")
     parts = urlsplit(value)
@@ -74,10 +113,14 @@ def _normalized_base(base_url: str) -> str:
 
 
 def _require_same_host(url: str, base_url: str) -> None:
+    if not _has_same_host(url, base_url):
+        raise ArmasUrlError("topic URL host must match configured base_url")
+
+
+def _has_same_host(url: str, base_url: str) -> bool:
     url_host = urlsplit(url).netloc.lower()
     base_host = urlsplit(_require_url(base_url)).netloc.lower()
-    if url_host != base_host:
-        raise ArmasUrlError("topic URL host must match configured base_url")
+    return url_host == base_host
 
 
 def _require_url(url: str) -> str:
