@@ -4,6 +4,7 @@ from sources.armas_es.urls import (
     ArmasUrlError,
     canonical_topic_url,
     extract_topic_id,
+    normalize_listing_page_url,
     normalize_topic_url,
     resolve_forum_url,
 )
@@ -39,6 +40,28 @@ def test_forum_url_can_be_resolved_from_relative_path() -> None:
     url = "viewforum.php?f=96&start=18"
 
     assert resolve_forum_url(url) == "https://www.armas.es/foros/viewforum.php?f=96&start=18"
+
+
+def test_listing_page_url_is_canonicalized_with_safe_query() -> None:
+    url = "./viewforum.php?f=96&p=999&start=18&sid=abc#p999"
+
+    assert normalize_listing_page_url(url) == (
+        "https://www.armas.es/foros/viewforum.php?f=96&start=18"
+    )
+
+
+def test_listing_page_url_must_stay_on_configured_host_path_and_forum() -> None:
+    assert (
+        normalize_listing_page_url("https://example.invalid/foros/viewforum.php?f=96&start=18")
+        is None
+    )
+    assert normalize_listing_page_url("./viewtopic.php?f=96&t=123&start=18") is None
+    assert normalize_listing_page_url("./viewforum.php?f=97&start=18", forum_id=96) is None
+
+
+@pytest.mark.parametrize("start", ["abc", "-1", "18&start=36"])
+def test_listing_page_url_rejects_untrusted_start_values(start: str) -> None:
+    assert normalize_listing_page_url(f"./viewforum.php?f=96&start={start}") is None
 
 
 def test_canonical_topic_url_uses_configured_forum_id() -> None:

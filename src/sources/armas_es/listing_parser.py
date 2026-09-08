@@ -8,15 +8,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.models import TopicListing
 from sources.armas_es.dates import ArmasDateError, parse_forum_datetime
 from sources.armas_es.urls import (
     DEFAULT_BASE_URL,
     DEFAULT_FORUM_ID,
-    FORUM_PATH,
     ArmasUrlError,
+    normalize_listing_page_url,
     normalize_topic_url,
 )
 
@@ -132,6 +132,7 @@ def parse_listing_page(
     next_page_url = _find_next_page_url(
         root,
         base_url=base_url,
+        forum_id=forum_id,
         current_start=current_start,
         fallback_page_size=fallback_page_size,
     )
@@ -247,6 +248,7 @@ def _find_next_page_url(
     root: _Element,
     *,
     base_url: str,
+    forum_id: int,
     current_start: int,
     fallback_page_size: int,
 ) -> str | None:
@@ -255,17 +257,27 @@ def _find_next_page_url(
             continue
         link = item.first_descendant(tag="a")
         if link is not None and link.attrs.get("rel") == "next":
-            return _clean_forum_url(link.attrs.get("href", ""), base_url=base_url)
+            return _clean_forum_url(
+                link.attrs.get("href", ""),
+                base_url=base_url,
+                forum_id=forum_id,
+            )
 
-    metadata_url = _next_page_from_metadata(root, base_url=base_url, current_start=current_start)
+    metadata_url = _next_page_from_metadata(
+        root,
+        base_url=base_url,
+        forum_id=forum_id,
+        current_start=current_start,
+    )
     if metadata_url is not None:
         return metadata_url
 
     if fallback_page_size <= 0:
         return None
     return _build_forum_page_url(
-        "viewforum.php?f=96",
+        f"viewforum.php?f={forum_id}",
         base_url=base_url,
+        forum_id=forum_id,
         start=current_start + fallback_page_size,
         start_name="start",
     )
@@ -275,6 +287,7 @@ def _next_page_from_metadata(
     root: _Element,
     *,
     base_url: str,
+    forum_id: int,
     current_start: int,
 ) -> str | None:
     for input_element in root.descendants("input"):
@@ -283,6 +296,8 @@ def _next_page_from_metadata(
         page_base_url = input_element.attrs.get("data-base-url")
         if not per_page or not page_base_url:
             continue
+        if start_name != "start":
+            continue
         try:
             next_start = current_start + int(per_page)
         except ValueError:
@@ -290,14 +305,24 @@ def _next_page_from_metadata(
         return _build_forum_page_url(
             page_base_url,
             base_url=base_url,
+            forum_id=forum_id,
             start=next_start,
             start_name=start_name,
         )
     return None
 
 
-def _build_forum_page_url(url: str, *, base_url: str, start: int, start_name: str) -> str:
-    resolved_url = _clean_forum_url(unescape(url), base_url=base_url)
+def _build_forum_page_url(
+    url: str,
+    *,
+    base_url: str,
+    forum_id: int,
+    start: int,
+    start_name: str,
+) -> str | None:
+    resolved_url = _clean_forum_url(unescape(url), base_url=base_url, forum_id=forum_id)
+    if resolved_url is None:
+        return None
     parts = urlsplit(resolved_url)
     query = [
         (key, value)
@@ -308,16 +333,11 @@ def _build_forum_page_url(url: str, *, base_url: str, start: int, start_name: st
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 
 
-def _clean_forum_url(url: str, *, base_url: str) -> str:
-    base = f"{base_url.rstrip('/')}{FORUM_PATH}"
-    resolved_url = urljoin(base, url.strip())
-    parts = urlsplit(resolved_url)
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() != "sid"
-    ]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+def _clean_forum_url(url: str, *, base_url: str, forum_id: int) -> str | None:
+    try:
+        return normalize_listing_page_url(url, base_url=base_url, forum_id=forum_id)
+    except ArmasUrlError:
+        return None
 
 
 def _ascii_text(value: str) -> str:

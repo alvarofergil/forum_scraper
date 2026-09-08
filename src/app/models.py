@@ -78,7 +78,6 @@ class TopicListing:
     last_post_author: str | None = None
     reply_count: int | None = None
     view_count: int | None = None
-    next_page_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
