@@ -169,4 +169,5 @@ def test_classification_context_carries_clean_structured_input_only() -> None:
     assert context.topic_title == "Vendo Acme Target Pro"
     assert context.original_author == "seller_001"
     assert context.posts[0].text == "Acme Target Pro en buen estado por 123 EUR"
+    assert context.posts[0].posted_at == "2026-01-02T10:30:00Z"
     assert "<html" not in context.model_dump_json().lower()

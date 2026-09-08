@@ -15,6 +15,7 @@ class ClassificationPost(BaseModel):
     sequence_number: int
     author: str
     text: str
+    posted_at: str
     external_post_id: str | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -51,6 +52,7 @@ class ClassificationContext(BaseModel):
                     sequence_number=post.sequence_number,
                     author=post.author,
                     text=post.text,
+                    posted_at=post.posted_at.isoformat().replace("+00:00", "Z"),
                     external_post_id=post.external_post_id,
                 )
                 for post in topic.posts

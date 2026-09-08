@@ -9,6 +9,7 @@ from classification.base import (
     PreviousFavoriteState,
 )
 from classification.fake import FakeClassifier
+from classification.openai_classifier import OpenAIClassifier
 
 __all__ = [
     "ClassificationContext",
@@ -16,5 +17,6 @@ __all__ = [
     "ClassificationResult",
     "FakeClassifier",
     "ListingClassifier",
+    "OpenAIClassifier",
     "PreviousFavoriteState",
 ]
