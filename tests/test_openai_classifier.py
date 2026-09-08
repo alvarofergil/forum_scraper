@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -41,6 +42,33 @@ def topic_with_html_markers() -> ParsedTopic:
                 posted_at=datetime(2026, 1, 2, 10, 30, tzinfo=UTC),
                 text="Acme Target Pro por 123 EUR. <html tag mentioned as plain text>",
                 external_post_id="456",
+            ),
+        ),
+    )
+
+
+def topic_with_two_ordered_posts() -> ParsedTopic:
+    return ParsedTopic(
+        topic_title="Vendo Acme Target Pro",
+        external_topic_id="123",
+        original_author="seller_001",
+        total_posts=2,
+        current_page=1,
+        total_pages=1,
+        posts=(
+            TopicPost(
+                sequence_number=1,
+                author="seller_001",
+                posted_at=datetime(2026, 1, 2, 10, 30, tzinfo=UTC),
+                text="Primer mensaje limpio",
+                external_post_id="456",
+            ),
+            TopicPost(
+                sequence_number=2,
+                author="buyer_001",
+                posted_at=datetime(2026, 1, 2, 11, 0, tzinfo=UTC),
+                text="Segundo mensaje limpio",
+                external_post_id="789",
             ),
         ),
     )
@@ -109,6 +137,23 @@ def test_classification_input_is_structured_and_does_not_send_html() -> None:
     assert "headers" not in payload_text.lower()
     assert "cookies" not in payload_text.lower()
     assert "<html" not in payload_text.lower()
+
+
+def test_classification_input_preserves_original_author_dates_and_post_order() -> None:
+    client = FakeOpenAIClient(valid_output())
+    classifier = OpenAIClassifier(model="gpt-test", client=client)
+
+    classifier.classify_new_candidate(watch_item(), topic_with_two_ordered_posts())
+
+    user_message = client.responses.calls[0]["input"][1]
+    payload = json.loads(user_message["content"])
+    posts = payload["topic"]["posts"]
+    assert payload["topic"]["original_author"] == "seller_001"
+    assert [post["sequence_number"] for post in posts] == [1, 2]
+    assert [post["posted_at"] for post in posts] == [
+        "2026-01-02T10:30:00Z",
+        "2026-01-02T11:00:00Z",
+    ]
 
 
 def test_classify_favorite_update_includes_previous_state() -> None:

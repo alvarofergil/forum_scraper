@@ -1,4 +1,3 @@
-"""Favorite topic monitoring services."""
 """Favorite monitoring exports."""
 
 from favorites.service import FavoriteService, compute_content_hash, post_content_hash
