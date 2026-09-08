@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -15,9 +16,17 @@ class ClassificationPost(BaseModel):
     sequence_number: int
     author: str
     text: str
+    posted_at: datetime
     external_post_id: str | None = None
 
     model_config = ConfigDict(frozen=True)
+
+    @field_validator("posted_at")
+    @classmethod
+    def _posted_at_must_be_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class ClassificationContext(BaseModel):
@@ -51,6 +60,7 @@ class ClassificationContext(BaseModel):
                     sequence_number=post.sequence_number,
                     author=post.author,
                     text=post.text,
+                    posted_at=post.posted_at,
                     external_post_id=post.external_post_id,
                 )
                 for post in topic.posts
