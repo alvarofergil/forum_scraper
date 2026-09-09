@@ -70,6 +70,8 @@ def test_example_config_is_valid() -> None:
     config = load_config(Path("config/config.example.yaml"))
 
     assert config.source.type == "armas_es"
+    assert config.ai.enabled is False
+    assert config.ai.model is None
     assert config.notifications.notify_event_types
 
 

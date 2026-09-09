@@ -151,7 +151,10 @@ cp .env.example .env
 
 Edita `config/config.yaml` con tu watchlist. Si `notifications.email_enabled=true`, rellena
 `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` y `NOTIFICATION_EMAIL` en `.env`.
-Si `ai.enabled=true` y usas el clasificador OpenAI, rellena `OPENAI_API_KEY`.
+El ejemplo deja `ai.enabled=false` para que el primer arranque no requiera coste ni secretos
+OpenAI. Para activar clasificacion con OpenAI, cambia `ai.enabled=true`, configura un
+`ai.model` no nulo en `config/config.yaml` y rellena `OPENAI_API_KEY`; la API key por si sola
+no basta si `ai.model` sigue en `null`.
 
 ## Docker
 

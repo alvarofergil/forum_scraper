@@ -21,7 +21,7 @@ scraping:
   user_agent: "PersonalForumMonitor/1.0"
 
 ai:
-  enabled: true
+  enabled: false
   model: null
   match_confidence_threshold: 0.85
 

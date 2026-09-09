@@ -1,6 +1,6 @@
 # TASK-019 - Hardening Final Y DoD v1
 
-Estado: `REVIEW`  
+Estado: `DONE`
 SPEC maestra: [../forum_scraper.md](../forum_scraper.md)  
 Documento maestro: [../forum_scraper_tasks.md](../forum_scraper_tasks.md)
 

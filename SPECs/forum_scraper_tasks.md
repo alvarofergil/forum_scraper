@@ -98,6 +98,7 @@ Si durante la implementacion aparece un comportamiento necesario pero fuera de l
 | HITO-05 | Operacion diaria y notificaciones | TASK-015, TASK-017 | Email configurable, reintentos, status, inspeccion, favoritos manuales y backup. |
 | HITO-05R | Correctivo tecnico post HITO-05 | TASK-024 | Backup con nombres seguros, notificaciones integradas en `run` y estado de eventos no notificables antes de HITO-06. |
 | HITO-06 | Despliegue y cierre v1 | TASK-018, TASK-019 | Docker/Raspberry listo y DoD v1 verificada. |
+| HITO-06R | Correctivo tecnico post HITO-06 | TASK-025 | Recuperacion de candidatos pendientes, resiliencia de favoritos y arranque operativo alineado. |
 
 Notas de arquitectura del plan:
 
@@ -133,8 +134,9 @@ Notas de arquitectura del plan:
 | HITO-05 | TASK-015 | DONE | Email SMTP y retry de notificaciones | Agente unico | [TASK-015](task_specs/TASK-015_email_notifications.md) | TASK-014 | `src/notifications/email.py` | `feat: add configurable email notifications` |
 | HITO-05 | TASK-017 | DONE | CLI operativa: status, favorites, inspect, backup | Agente unico | [TASK-017](task_specs/TASK-017_operational_cli.md) | TASK-003, TASK-013, TASK-015, TASK-016 | `src/app/cli.py`, `src/storage/` | `feat: add operational cli commands` |
 | HITO-05R | TASK-024 | DONE | Correctivo tecnico post HITO-05 | Agente unico | [TASK-024](task_specs/TASK-024_hito_05_sanity_remediation.md) | TASK-015, TASK-017, TASK-023 | `src/app/cli.py`, `src/notifications/email.py`, `src/storage/operational.py`, `tests/`, `README.md` | `fix: harden hito 05 operational contracts` |
-| HITO-06 | TASK-018 | REVIEW | Docker, Raspberry readiness y README | Agente unico | [TASK-018](task_specs/TASK-018_docker_raspberry.md) | TASK-024 | `Dockerfile`, `docker-compose.yml`, `README.md` | `feat: add portable docker deployment` |
-| HITO-06 | TASK-019 | REVIEW | Hardening final y DoD v1 | Agente unico | [TASK-019](task_specs/TASK-019_final_acceptance.md) | TASK-001..TASK-018, TASK-020 | todo el proyecto | `test: complete v1 acceptance coverage` |
+| HITO-06 | TASK-018 | DONE | Docker, Raspberry readiness y README | Agente unico | [TASK-018](task_specs/TASK-018_docker_raspberry.md) | TASK-024 | `Dockerfile`, `docker-compose.yml`, `README.md` | `feat: add portable docker deployment` |
+| HITO-06 | TASK-019 | DONE | Hardening final y DoD v1 | Agente unico | [TASK-019](task_specs/TASK-019_final_acceptance.md) | TASK-001..TASK-018, TASK-020 | todo el proyecto | `test: complete v1 acceptance coverage` |
+| HITO-06R | TASK-025 | TODO | Correctivo post HITO-06: recuperacion de pendientes y arranque operativo | Agente unico | [TASK-025](task_specs/TASK-025_hito_06_sanity_remediation.md) | TASK-018, TASK-019, TASK-024 | `src/discovery/service.py`, `src/favorites/service.py`, `src/storage/repositories.py`, `src/app/cli.py`, `config/config.example.yaml`, `README.md`, `tests/` | `fix: harden pending recovery after hito 06` |
 
 ## Notas De Coordinacion
 
@@ -147,3 +149,4 @@ Notas de arquitectura del plan:
 - TASK-022 nace del sanity check post HITO-03 y debe completarse antes de `TASK-010`.
 - TASK-023 nace del sanity check post HITO-04 y debe completarse antes de `TASK-015` y `TASK-017`.
 - TASK-024 nace del sanity check post HITO-05 y debe completarse antes de `TASK-018` para no construir Docker/Raspberry sobre contratos operativos ambiguos.
+- TASK-025 nace del sanity check post HITO-06 y debe completarse antes de considerar v1 cerrada operacionalmente.

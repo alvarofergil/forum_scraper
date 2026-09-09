@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import AppConfig
 from app.models import (
     CandidateStatus,
+    EventType,
     ListingType,
     ParsedTopic,
     TopicListing,
@@ -22,6 +23,7 @@ from app.models import (
 )
 from classification.base import ClassificationResult, ListingClassifier
 from discovery.matcher import match_listing
+from events.service import EventService
 from favorites.service import FavoriteService
 from sources.armas_es.client import ArmasEsClient
 from sources.armas_es.listing_parser import ParsedListingPage, parse_listing_page
@@ -38,6 +40,7 @@ BOOTSTRAP_COMPLETED_AT_KEY = "bootstrap_completed_at"
 LAST_SUCCESSFUL_DISCOVERY_AT_KEY = "last_successful_discovery_at"
 LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY = "last_successful_favorites_check_at"
 DEFAULT_LISTING_PAGE_SIZE = 18
+DEFAULT_PENDING_CANDIDATE_BATCH_SIZE = 50
 LOGGER = logging.getLogger(__name__)
 
 
@@ -70,8 +73,16 @@ class RunResult:
     discovery_candidates_seen: int
     discovery_completed: bool
     discovery_limit_reached: bool
+    pending_candidates_checked: int
+    pending_candidates_classified: int
+    pending_candidates_discarded: int
+    pending_candidates_failed: int
+    pending_candidates_remaining: int
+    pending_candidates_completed: bool
+    pending_candidates_skipped: bool
     favorites_checked: int
     favorites_changed: int
+    favorites_check_errors: int
     favorites_check_completed: bool
     favorites_check_skipped: bool
 
@@ -127,6 +138,7 @@ class DiscoveryService:
 
         started_at = utc_now()
         discovery = self._run_incremental_discovery(started_at)
+        pending = self._process_pending_candidates()
         favorites = self._run_favorites_check(started_at)
         return RunResult(
             discovery_pages_seen=discovery.pages_seen,
@@ -134,8 +146,16 @@ class DiscoveryService:
             discovery_candidates_seen=discovery.candidates_seen,
             discovery_completed=discovery.completed,
             discovery_limit_reached=discovery.limit_reached,
+            pending_candidates_checked=pending.checked,
+            pending_candidates_classified=pending.classified,
+            pending_candidates_discarded=pending.discarded,
+            pending_candidates_failed=pending.failed,
+            pending_candidates_remaining=pending.remaining,
+            pending_candidates_completed=pending.completed,
+            pending_candidates_skipped=pending.skipped,
             favorites_checked=favorites.checked,
             favorites_changed=favorites.changed,
+            favorites_check_errors=favorites.errors,
             favorites_check_completed=favorites.completed,
             favorites_check_skipped=favorites.skipped,
         )
@@ -196,7 +216,13 @@ class DiscoveryService:
 
     def _run_favorites_check(self, started_at: datetime) -> _FavoriteCheckResult:
         if not self.config.favorites.check_every_run:
-            return _FavoriteCheckResult(checked=0, changed=0, completed=False, skipped=True)
+            return _FavoriteCheckResult(
+                checked=0,
+                changed=0,
+                errors=0,
+                completed=False,
+                skipped=True,
+            )
 
         with session_scope(self.session_factory) as session:
             state = AppStateRepository(session)
@@ -209,14 +235,26 @@ class DiscoveryService:
                     LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY,
                     started_at.isoformat().replace("+00:00", "Z"),
                 )
-                return _FavoriteCheckResult(checked=0, changed=0, completed=True, skipped=False)
+                return _FavoriteCheckResult(
+                    checked=0,
+                    changed=0,
+                    errors=0,
+                    completed=True,
+                    skipped=False,
+                )
 
             if self.classifier is None:
                 _log_warning(
                     "favorites check incomplete because classifier is unavailable",
                     extra={"active_favorites": len(favorites)},
                 )
-                return _FavoriteCheckResult(checked=0, changed=0, completed=False, skipped=False)
+                return _FavoriteCheckResult(
+                    checked=0,
+                    changed=0,
+                    errors=0,
+                    completed=False,
+                    skipped=False,
+                )
 
             service = FavoriteService(
                 session,
@@ -227,6 +265,7 @@ class DiscoveryService:
             )
             checked = 0
             changed = 0
+            errors = 0
             for favorite in favorites:
                 watch_item = watch_items.get(favorite.watch_item_id)
                 if watch_item is None:
@@ -234,17 +273,95 @@ class DiscoveryService:
                 checked += 1
                 if service.check_favorite(favorite.id, watch_item=watch_item):
                     changed += 1
+                if service.last_check_had_error:
+                    errors += 1
 
-            state.set(
-                LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY,
-                started_at.isoformat().replace("+00:00", "Z"),
-            )
+            completed = errors == 0
+            if completed:
+                state.set(
+                    LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY,
+                    started_at.isoformat().replace("+00:00", "Z"),
+                )
             return _FavoriteCheckResult(
                 checked=checked,
                 changed=changed,
-                completed=True,
+                errors=errors,
+                completed=completed,
                 skipped=False,
             )
+
+    def _process_pending_candidates(self) -> _PendingCandidateCounters:
+        with session_scope(self.session_factory) as session:
+            candidates = CandidateMatchRepository(session)
+            pending_count = candidates.count_pending()
+            counters = _PendingCandidateCounters(remaining=pending_count)
+            if pending_count == 0:
+                counters.completed = True
+                return counters
+            if not self.config.ai.enabled:
+                counters.skipped = True
+                return counters
+            if self.classifier is None:
+                counters.skipped = True
+                return counters
+
+            watch_items = {item.id: item for item in self.config.watchlist}
+            favorites = FavoriteService(session, ai_config=self.config.ai)
+            events = EventService(session)
+
+            for candidate in candidates.list_pending(limit=DEFAULT_PENDING_CANDIDATE_BATCH_SIZE):
+                counters.checked += 1
+                topic = candidate.topic
+                watch_item = watch_items.get(candidate.watch_item_id)
+                if watch_item is None:
+                    counters.failed += 1
+                    _emit_error(
+                        events,
+                        topic_external_id=topic.external_topic_id,
+                        topic_id=topic.id,
+                        watch_item_id=candidate.watch_item_id,
+                        scope="pending_candidate_missing_watch_item",
+                        error=LookupError("watch item not configured"),
+                    )
+                    continue
+
+                try:
+                    parsed_topic = self.topic_fetcher.fetch_topic(
+                        external_topic_id=topic.external_topic_id,
+                        canonical_url=topic.canonical_url,
+                    )
+                    result = self.classifier.classify_new_candidate(watch_item, parsed_topic)
+                except Exception as exc:
+                    counters.failed += 1
+                    _emit_error(
+                        events,
+                        topic_external_id=topic.external_topic_id,
+                        topic_id=topic.id,
+                        watch_item_id=watch_item.id,
+                        scope="pending_candidate_classification",
+                        error=exc,
+                    )
+                    continue
+
+                if _is_confirmed_offer(result, self.config.ai.match_confidence_threshold):
+                    favorite, favorite_created = favorites.create_from_classification(
+                        watch_item=watch_item,
+                        topic=parsed_topic,
+                        result=result,
+                        canonical_url=topic.canonical_url,
+                    )
+                    candidates.mark_classified(candidate, confidence=result.confidence)
+                    counters.classified += 1
+                    if favorite is not None and favorite_created:
+                        counters.favorites_created += 1
+                else:
+                    candidates.mark_discarded(candidate, confidence=result.confidence)
+                    counters.discarded += 1
+
+            session.flush()
+            counters.remaining = candidates.count_pending()
+            counters.completed = counters.remaining == 0 and counters.failed == 0
+            return counters
 
     def _process_listings(
         self,
@@ -347,12 +464,59 @@ class _DiscoveryRunCounters(_BootstrapCounters):
     limit_reached: bool = False
 
 
+@dataclass(slots=True)
+class _PendingCandidateCounters:
+    checked: int = 0
+    classified: int = 0
+    discarded: int = 0
+    failed: int = 0
+    favorites_created: int = 0
+    remaining: int = 0
+    completed: bool = False
+    skipped: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class _FavoriteCheckResult:
     checked: int
     changed: int
+    errors: int
     completed: bool
     skipped: bool
+
+
+def _emit_error(
+    events: EventService,
+    *,
+    topic_external_id: str,
+    topic_id: int | None,
+    watch_item_id: str,
+    scope: str,
+    error: Exception,
+) -> None:
+    events.emit(
+        event_type=EventType.ERROR,
+        deduplication_key=(
+            f"topic:{topic_external_id}|watch:{watch_item_id}|event:ERROR|"
+            f"scope:{scope}|error:{type(error).__name__}"
+        ),
+        topic_id=topic_id,
+        watch_item_id=watch_item_id,
+        payload={
+            "topic_external_id": topic_external_id,
+            "watch_item_id": watch_item_id,
+            "scope": scope,
+            "error_type": type(error).__name__,
+        },
+        error_message=_safe_error_message(error),
+    )
+
+
+def _safe_error_message(error: Exception) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for marker in ("OPENAI_API_KEY", "Authorization", "Cookie", "password", "token"):
+        message = message.replace(marker, "[redacted]")
+    return message[:1000]
 
 
 def _log_warning(message: str, *, extra: dict[str, object]) -> None:

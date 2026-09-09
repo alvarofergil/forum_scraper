@@ -352,6 +352,123 @@ def test_check_changed_favorite_calls_classifier_and_records_price_change(tmp_pa
         )
 
 
+def test_favorite_classification_error_keeps_state_retryable_and_emits_error(
+    tmp_path: Path,
+) -> None:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    changed_topic = topic(text="Acme Target Pro rebajada a 100 EUR", post_id="789")
+    fetcher = FakeTopicFetcher(changed_topic)
+    classifier = FakeClassifier(error=RuntimeError("temporary Authorization token"))
+
+    with session_scope(factory) as session:
+        service = FavoriteService(session, topic_fetcher=fetcher, classifier=classifier)
+        favorite, _ = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=topic(),
+            result=positive_result(price=123),
+            canonical_url=canonical_url(),
+        )
+        original_hash = favorite.last_content_hash
+        original_classified_at = favorite.last_classified_at
+
+        changed = service.check_favorite(favorite.id, watch_item=watch_item())
+        repeated = service.check_favorite(favorite.id, watch_item=watch_item())
+
+        assert changed is False
+        assert repeated is False
+        assert service.last_check_had_error is True
+        assert favorite.last_content_hash == original_hash
+        assert favorite.last_classified_at == original_classified_at
+        assert str(favorite.current_price) == "123.00"
+        assert favorite.status == AvailabilityStatus.AVAILABLE.value
+        assert favorite.is_active is True
+        assert session.query(PriceHistoryORM).count() == 1
+        assert session.query(StatusHistoryORM).count() == 1
+        error = session.query(EventORM).filter_by(event_type=EventType.ERROR.value).one()
+        assert "Authorization" not in error.error_message
+
+
+def test_favorite_checks_can_continue_after_one_classification_error(tmp_path: Path) -> None:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    first_changed = topic(text="Acme Target Pro rebajada", post_id="789")
+    second_changed = topic(text="Acme Target Pro reservada", post_id="999")
+
+    class RoutedFetcher:
+        def fetch_topic(
+            self,
+            *,
+            external_topic_id: str,
+            canonical_url: str | None = None,
+        ) -> ParsedTopic:
+            if external_topic_id == "123":
+                return first_changed
+            return ParsedTopic(
+                topic_title=second_changed.topic_title,
+                external_topic_id=external_topic_id,
+                original_author=second_changed.original_author,
+                total_posts=second_changed.total_posts,
+                current_page=second_changed.current_page,
+                total_pages=second_changed.total_pages,
+                posts=second_changed.posts,
+            )
+
+    class OneFailingClassifier:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def classify_new_candidate(
+            self,
+            watch_item: WatchItem,
+            topic: ParsedTopic,
+        ) -> ClassificationResult:
+            return positive_result()
+
+        def classify_favorite_update(
+            self,
+            previous_state: object,
+            watch_item: WatchItem,
+            topic: ParsedTopic,
+        ) -> ClassificationResult:
+            self.calls.append(topic.external_topic_id)
+            if topic.external_topic_id == "123":
+                raise RuntimeError("classifier down")
+            return positive_result(price=100)
+
+    with session_scope(factory) as session:
+        classifier = OneFailingClassifier()
+        service = FavoriteService(session, topic_fetcher=RoutedFetcher(), classifier=classifier)
+        first, _ = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=topic(),
+            result=positive_result(price=123),
+            canonical_url=canonical_url(),
+        )
+        second_topic = topic(post_id="654")
+        second_topic = ParsedTopic(
+            topic_title=second_topic.topic_title,
+            external_topic_id="456",
+            original_author=second_topic.original_author,
+            total_posts=second_topic.total_posts,
+            current_page=second_topic.current_page,
+            total_pages=second_topic.total_pages,
+            posts=second_topic.posts,
+        )
+        second, _ = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=second_topic,
+            result=positive_result(price=150),
+            canonical_url="https://example.test/topics/456",
+        )
+
+        assert service.check_favorite(first.id, watch_item=watch_item()) is False
+        assert service.last_check_had_error is True
+        assert service.check_favorite(second.id, watch_item=watch_item()) is True
+        assert classifier.calls == ["123", "456"]
+        assert str(second.current_price) == "100.00"
+
+
 def test_title_only_change_calls_classifier(tmp_path: Path) -> None:
     engine = create_sqlite_engine(migrated_db_path(tmp_path))
     factory = session_factory(engine)

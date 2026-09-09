@@ -78,3 +78,16 @@ def test_env_example_contains_placeholders_without_secret_values() -> None:
     assert "OPENAI_API_KEY=" in env_example
     assert "env-secret" not in env_example
     assert "example-password" not in env_example
+
+
+def test_example_config_and_readme_use_no_ai_by_default() -> None:
+    config = yaml.safe_load(read_text("config/config.example.yaml"))
+    readme = read_text("README.md")
+
+    assert config["ai"]["enabled"] is False
+    assert config["ai"]["model"] is None
+    assert "ai.enabled=false" in readme
+    assert "ai.model" in readme
+    assert "OPENAI_API_KEY" in readme
+    assert "API key por si sola" in readme
+    assert "no basta" in readme

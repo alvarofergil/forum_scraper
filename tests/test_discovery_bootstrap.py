@@ -22,6 +22,7 @@ from app.config import (
 from app.models import (
     AvailabilityStatus,
     CandidateStatus,
+    EventType,
     ListingType,
     ParsedTopic,
     TopicListing,
@@ -32,6 +33,7 @@ from classification.base import ClassificationResult
 from classification.fake import FakeClassifier
 from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
 from sources.armas_es.client import ArmasHttpResponse
+from sources.base import TopicFetchTransientError
 from storage import create_sqlite_engine, session_factory, session_scope
 from storage.orm import CandidateMatchORM, EventORM, FavoriteORM, PriceHistoryORM, TopicORM
 from storage.repositories import AppStateRepository
@@ -62,6 +64,7 @@ class FakeListingClient:
 class FakeTopicFetcher:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
+        self.error: Exception | None = None
 
     def fetch_topic(
         self,
@@ -70,6 +73,8 @@ class FakeTopicFetcher:
         canonical_url: str | None = None,
     ) -> ParsedTopic:
         self.calls.append((external_topic_id, canonical_url))
+        if self.error is not None:
+            raise self.error
         return parsed_topic(external_topic_id=external_topic_id)
 
 
@@ -538,6 +543,126 @@ def test_run_retries_existing_pending_candidate(tmp_path: Path) -> None:
         ] * 2
         assert classifier.new_candidate_calls
         assert session.query(CandidateMatchORM).one().status == CandidateStatus.CLASSIFIED.value
+
+
+def test_run_processes_pending_candidate_absent_from_current_listing(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=positive_result())
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.listing_parser = parser_for_pages({})
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.pending_candidates_checked == 1
+        assert result.pending_candidates_classified == 1
+        assert result.pending_candidates_remaining == 0
+        assert result.pending_candidates_completed is True
+        assert topic_fetcher.calls[0] == (
+            "100",
+            "https://www.armas.es/foros/viewtopic.php?f=96&t=100",
+        )
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.CLASSIFIED.value
+        assert session.query(FavoriteORM).count() == 1
+
+
+def test_pending_positive_candidate_creates_favorite_once(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=positive_result())
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.listing_parser = parser_for_pages({})
+
+    first = service.run_once()
+    second = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert first.pending_candidates_classified == 1
+        assert second.pending_candidates_checked == 0
+        assert session.query(FavoriteORM).count() == 1
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.CLASSIFIED.value
+
+
+def test_pending_negative_candidate_is_discarded(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=negative_result())
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.listing_parser = parser_for_pages({})
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.pending_candidates_discarded == 1
+        assert result.pending_candidates_remaining == 0
+        assert session.query(FavoriteORM).count() == 0
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.DISCARDED.value
+
+
+def test_pending_fetch_error_remains_pending_and_emits_deduplicated_error(
+    tmp_path: Path,
+) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.listing_parser = parser_for_pages({})
+    topic_fetcher.error = TopicFetchTransientError("temporary OPENAI_API_KEY token")
+
+    first = service.run_once()
+    second = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert first.pending_candidates_failed == 1
+        assert second.pending_candidates_failed == 1
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.PENDING.value
+        assert session.query(FavoriteORM).count() == 0
+        assert session.query(EventORM).filter_by(event_type=EventType.ERROR.value).count() == 1
+        assert "OPENAI_API_KEY" not in session.query(EventORM).one().error_message
+
+
+def test_pending_classification_error_remains_retryable(tmp_path: Path) -> None:
+    classifier = FakeClassifier(error=RuntimeError("classifier unavailable"))
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.listing_parser = parser_for_pages({})
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.pending_candidates_failed == 1
+        assert result.pending_candidates_remaining == 1
+        assert result.pending_candidates_completed is False
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.PENDING.value
+        assert session.query(FavoriteORM).count() == 0
+        assert session.query(EventORM).filter_by(event_type=EventType.ERROR.value).count() == 1
 
 
 def test_run_does_not_reclassify_discarded_candidate(tmp_path: Path) -> None:
