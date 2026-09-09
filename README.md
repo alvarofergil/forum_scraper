@@ -77,7 +77,7 @@ Responsabilidades principales:
 - `storage`: SQLite, SQLAlchemy, Alembic y repositorios.
 - `app`: CLI y cableado de aplicacion.
 
-## Comandos Planeados Para v1
+## Comandos Operativos Para v1
 
 ```bash
 python -m app bootstrap
@@ -93,8 +93,22 @@ python -m app favorite reactivate <TOPIC_ID>
 python -m app debug-listing
 ```
 
-Estos comandos se implementaran gradualmente. El README se actualizara cuando cada uno sea
-realmente usable.
+`python -m app run` ejecuta una unica pasada finita de discovery y comprobacion de
+favoritos. Si `notifications.email_enabled=true`, al final de la pasada intenta enviar o
+reintentar las notificaciones pendientes y fallidas con las variables SMTP del entorno.
+Si el email esta desactivado, no carga secretos SMTP ni abre conexiones SMTP.
+
+`python -m app retry-notifications` queda como comando de recuperacion manual para
+reenviar eventos `PENDING` o `FAILED`.
+
+`python -m app status` puede ejecutarse sin YAML para inspeccionar una base de datos. Si
+se pasa `--config`, los contadores `events_pending` y `events_failed` reflejan solo
+eventos accionables para `notifications.notify_event_types`; los excluidos aparecen en
+`events_pending_non_notifiable` y `events_failed_non_notifiable`.
+
+`python -m app backup` sin ruta crea una copia consistente con nombre
+`backups/monitor-YYYYMMDD-HHMMSS.db` y evita sobrescribir colisiones en el mismo segundo
+anadiendo un sufijo. `python -m app backup <RUTA>` respeta la ruta explicita.
 
 ## Desarrollo Local
 

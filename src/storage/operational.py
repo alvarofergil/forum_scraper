@@ -26,6 +26,8 @@ class OperationalStatus:
     events_pending: int
     events_failed: int
     events_sent: int
+    events_pending_non_notifiable: int
+    events_failed_non_notifiable: int
     state: tuple[tuple[str, str], ...]
 
 
@@ -61,8 +63,33 @@ class FavoriteActionResult:
     changed: bool
 
 
-def read_status(session: Session) -> OperationalStatus:
+def read_status(
+    session: Session,
+    *,
+    notify_event_types: tuple[EventType, ...] | None = None,
+) -> OperationalStatus:
     """Return aggregate monitor state without exposing sensitive payloads."""
+
+    pending_total = _event_count(session, NotificationStatus.PENDING)
+    failed_total = _event_count(session, NotificationStatus.FAILED)
+    if notify_event_types is None:
+        pending_actionable = pending_total
+        failed_actionable = failed_total
+        pending_non_notifiable = 0
+        failed_non_notifiable = 0
+    else:
+        pending_actionable = _event_count(
+            session,
+            NotificationStatus.PENDING,
+            notify_event_types=notify_event_types,
+        )
+        failed_actionable = _event_count(
+            session,
+            NotificationStatus.FAILED,
+            notify_event_types=notify_event_types,
+        )
+        pending_non_notifiable = pending_total - pending_actionable
+        failed_non_notifiable = failed_total - failed_actionable
 
     return OperationalStatus(
         topics=_count(session, TopicORM),
@@ -74,9 +101,11 @@ def read_status(session: Session) -> OperationalStatus:
             CandidateMatchORM,
             CandidateMatchORM.status == "PENDING",
         ),
-        events_pending=_event_count(session, NotificationStatus.PENDING),
-        events_failed=_event_count(session, NotificationStatus.FAILED),
+        events_pending=pending_actionable,
+        events_failed=failed_actionable,
         events_sent=_event_count(session, NotificationStatus.SENT),
+        events_pending_non_notifiable=pending_non_notifiable,
+        events_failed_non_notifiable=failed_non_notifiable,
         state=tuple(
             session.execute(select(AppStateORM.key, AppStateORM.value).order_by(AppStateORM.key))
         ),
@@ -173,8 +202,18 @@ def _count(session: Session, model: type[object], *criteria: object) -> int:
     return int(session.scalar(stmt) or 0)
 
 
-def _event_count(session: Session, status: NotificationStatus) -> int:
-    return _count(session, EventORM, EventORM.notification_status == status.value)
+def _event_count(
+    session: Session,
+    status: NotificationStatus,
+    *,
+    notify_event_types: tuple[EventType, ...] | None = None,
+) -> int:
+    criteria: list[object] = [EventORM.notification_status == status.value]
+    if notify_event_types is not None:
+        criteria.append(
+            EventORM.event_type.in_([event_type.value for event_type in notify_event_types])
+        )
+    return _count(session, EventORM, *criteria)
 
 
 def _topic_by_identifier(session: Session, topic_identifier: str) -> TopicORM | None:
