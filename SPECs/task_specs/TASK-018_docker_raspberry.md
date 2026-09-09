@@ -1,6 +1,6 @@
 # TASK-018 - Docker, Raspberry Readiness Y README
 
-Estado: `TODO`  
+Estado: `IN_PROGRESS`  
 SPEC maestra: [../forum_scraper.md](../forum_scraper.md)  
 Documento maestro: [../forum_scraper_tasks.md](../forum_scraper_tasks.md)
 
@@ -50,10 +50,12 @@ Hacer la aplicacion portable con Docker y documentar despliegue PC -> Raspberry.
 ## Archivos Permitidos O Esperados
 
 - `Dockerfile`
+- `.dockerignore`
 - `docker-compose.yml`
 - `.env.example`
 - `README.md`
 - `docs/`
+- `tests/test_deployment_artifacts.py`
 - `SPECs/forum_scraper_tasks.md`
 
 ## Requisitos Funcionales

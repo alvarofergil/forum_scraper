@@ -1,0 +1,14 @@
+services:
+  forum-scraper:
+    build:
+      context: .
+    image: forum-scraper:local
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./backups:/app/backups
+    command: ["run"]
+    restart: "no"
