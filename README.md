@@ -151,25 +151,23 @@ El proyecto se desarrolla tarea a tarea.
 
 Para cada tarea:
 
-1. sincronizar `main` con `git pull --ff-only origin main`;
-2. crear una rama descriptiva desde `main`, por ejemplo `TASK-002_config_and_domain_models`;
-3. implementar con TDD;
-4. ejecutar tests y checks;
-5. hacer un commit de la tarea;
-6. subir la rama;
-7. abrir un PR hacia `main`.
+1. leer `SPECs/AGENT_START.md`;
+2. leer la fila de la tarea en `SPECs/forum_scraper_tasks.md`;
+3. leer la sub-SPEC activa y `SPECs/skills/forum-task-agent/SKILL.md`;
+4. implementar con tests focalizados;
+5. ejecutar la verificacion requerida.
+
+El flujo de rama, commit, push y PR se ejecuta cuando se pida release o cuando la tarea lo exija expresamente.
 
 Una tarea queda en `REVIEW` cuando el PR existe y en `DONE` cuando el PR se mergea en `main`.
 
 ## Documentacion Del Proyecto
 
-Las SPECs viven fuera del paquete desplegable, en `../SPECs/`, y actuan como contrato operativo
-para agentes IA:
+Las SPECs viven dentro del repo, en `SPECs/`, y actuan como contrato operativo para agentes IA:
 
 - `SPECs/forum_scraper.md`: SPEC maestra.
 - `SPECs/forum_scraper_tasks.md`: documento maestro de tareas.
 - `SPECs/task_specs/`: sub-SPECs por tarea.
-- `SPECs/skills/`: roles del proyecto.
+- `SPECs/skills/forum-task-agent/SKILL.md`: checklist unico de trabajo.
 
-Antes de implementar cualquier tarea, el agente debe leer la SPEC maestra, el documento maestro,
-la sub-SPEC activa y las skills de los roles aplicables.
+`AGENT_START.md` es la autoridad de arranque: lectura progresiva, un unico agente por defecto y SPEC maestra solo por fragmentos salvo necesidad global.
