@@ -7,7 +7,7 @@ services:
       - path: .env
         required: false
     volumes:
-      - ./config:/app/config
+      - ./config:/app/config:ro
       - ./data:/app/data
       - ./backups:/app/backups
     command: ["run"]

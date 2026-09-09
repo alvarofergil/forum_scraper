@@ -15,7 +15,7 @@ def test_docker_compose_mounts_portable_runtime_directories() -> None:
     assert service["build"]["context"] == "."
     assert service["env_file"] == [{"path": ".env", "required": False}]
     assert service["volumes"] == [
-        "./config:/app/config",
+        "./config:/app/config:ro",
         "./data:/app/data",
         "./backups:/app/backups",
     ]

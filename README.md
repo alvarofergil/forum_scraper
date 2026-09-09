@@ -162,6 +162,9 @@ El despliegue Docker usa los mismos directorios portables que la ejecucion local
 - `backups/`: copias generadas por `python -m app backup`.
 - `.env`: secretos locales cargados por Docker Compose.
 
+Docker Compose monta `config/` como solo lectura dentro del contenedor y mantiene `data/` y
+`backups/` con escritura para conservar SQLite y copias entre recreaciones.
+
 Construir la imagen local:
 
 ```bash
