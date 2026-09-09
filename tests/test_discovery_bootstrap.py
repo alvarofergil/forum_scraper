@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from app.config import (
 )
 from app.models import (
     AvailabilityStatus,
+    CandidateStatus,
     ListingType,
     ParsedTopic,
     TopicListing,
@@ -79,6 +81,7 @@ def app_config(
     *,
     pages: int = 10,
     ai_enabled: bool = True,
+    favorites_check_every_run: bool = True,
     threshold: float = 0.85,
     overlap_minutes: int = 30,
     max_pages_per_run: int = 50,
@@ -90,7 +93,7 @@ def app_config(
             overlap_minutes=overlap_minutes,
             max_pages_per_run=max_pages_per_run,
         ),
-        favorites=FavoritesConfig(),
+        favorites=FavoritesConfig(check_every_run=favorites_check_every_run),
         scraping=ScrapingConfig(request_delay_seconds=0),
         ai=AiConfig(enabled=ai_enabled, match_confidence_threshold=threshold, model="test-model"),
         notifications=NotificationsConfig(),
@@ -342,7 +345,10 @@ def test_run_uses_overlap_and_stops_after_cutoff(tmp_path: Path) -> None:
         )
 
 
-def test_run_safety_limit_prevents_false_discovery_checkpoint(tmp_path: Path) -> None:
+def test_run_safety_limit_prevents_false_discovery_checkpoint(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     service, listing_client, _topic_fetcher = service_for(
         tmp_path,
         config=app_config(max_pages_per_run=2),
@@ -351,6 +357,8 @@ def test_run_safety_limit_prevents_false_discovery_checkpoint(tmp_path: Path) ->
             18: (listing("200", last_activity_at=datetime(2026, 1, 2, 11, 59, tzinfo=UTC)),),
         },
     )
+    caplog.set_level(logging.WARNING, logger="discovery.service")
+    logging.getLogger("discovery.service").addHandler(caplog.handler)
     previous_checkpoint = datetime(2026, 1, 2, 10, 0, tzinfo=UTC)
 
     with session_scope(service.session_factory) as session:
@@ -365,10 +373,41 @@ def test_run_safety_limit_prevents_false_discovery_checkpoint(tmp_path: Path) ->
         assert listing_client.starts == [0, 18]
         assert result.discovery_completed is False
         assert result.discovery_limit_reached is True
+        assert "discovery reached max_pages_per_run without cutoff" in caplog.text
         assert (
             AppStateRepository(session).get("last_successful_discovery_at")
             == previous_checkpoint.isoformat().replace("+00:00", "Z")
         )
+
+
+def test_run_without_discovery_checkpoint_uses_bootstrap_checkpoint(tmp_path: Path) -> None:
+    service, listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=2, overlap_minutes=30),
+        pages={
+            0: (
+                listing("100", last_activity_at=datetime(2026, 1, 2, 11, 20, tzinfo=UTC)),
+            ),
+            18: (
+                listing("200", last_activity_at=datetime(2026, 1, 2, 11, 10, tzinfo=UTC)),
+            ),
+        },
+    )
+
+    with session_scope(service.session_factory) as session:
+        AppStateRepository(session).set(
+            "bootstrap_completed_at",
+            datetime(2026, 1, 2, 12, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        )
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert listing_client.starts == [0]
+        assert result.discovery_completed is True
+        assert result.discovery_limit_reached is False
+        assert session.query(TopicORM).filter_by(external_topic_id="100").count() == 0
+        assert AppStateRepository(session).get("last_successful_discovery_at") is not None
 
 
 def test_run_does_not_fetch_complete_topic_for_non_candidate_listing(tmp_path: Path) -> None:
@@ -410,6 +449,135 @@ def test_run_checks_old_favorite_even_when_absent_from_listing(tmp_path: Path) -
             ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
         ]
         assert AppStateRepository(session).get("last_successful_favorites_check_at") is not None
+
+
+def test_run_skips_favorites_when_disabled_by_config(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, favorites_check_every_run=False),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    service.bootstrap(force=True)
+    service.listing_parser = parser_for_pages({})
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_checked == 0
+        assert result.favorites_changed == 0
+        assert result.favorites_check_completed is False
+        assert result.favorites_check_skipped is True
+        assert topic_fetcher.calls == []
+        assert AppStateRepository(session).get("last_successful_favorites_check_at") is None
+
+
+def test_run_with_active_favorite_and_no_classifier_is_incomplete(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    service.bootstrap(force=True)
+    service.classifier = None
+    service.listing_parser = parser_for_pages({})
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_checked == 0
+        assert result.favorites_changed == 0
+        assert result.favorites_check_completed is False
+        assert result.favorites_check_skipped is False
+        assert topic_fetcher.calls == []
+        assert AppStateRepository(session).get("last_successful_favorites_check_at") is None
+
+
+def test_run_without_active_favorites_completes_check_without_fetching(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={},
+    )
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_checked == 0
+        assert result.favorites_changed == 0
+        assert result.favorites_check_completed is True
+        assert result.favorites_check_skipped is False
+        assert topic_fetcher.calls == []
+        assert AppStateRepository(session).get("last_successful_favorites_check_at") is not None
+
+
+def test_run_retries_existing_pending_candidate(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=positive_result())
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.discovery_candidates_seen == 1
+        assert topic_fetcher.calls[0] == (
+            "100",
+            "https://www.armas.es/foros/viewtopic.php?f=96&t=100",
+        )
+        assert topic_fetcher.calls == [
+            ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
+        ] * 2
+        assert classifier.new_candidate_calls
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.CLASSIFIED.value
+
+
+def test_run_does_not_reclassify_discarded_candidate(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=negative_result())
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    assert result.discovery_candidates_seen == 1
+    assert topic_fetcher.calls == []
+    assert len(classifier.new_candidate_calls) == 1
+
+
+def test_run_does_not_reclassify_classified_candidate_from_listing(tmp_path: Path) -> None:
+    classifier = FakeClassifier(default_result=positive_result())
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=classifier,
+    )
+    service.run_once()
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    assert result.discovery_candidates_seen == 1
+    assert topic_fetcher.calls == [
+        ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
+    ]
+    assert result.favorites_checked == 1
+    assert len(classifier.new_candidate_calls) == 1
+    assert len(classifier.favorite_update_calls) == 0
 
 
 def test_two_runs_without_changes_do_not_duplicate_events(tmp_path: Path) -> None:

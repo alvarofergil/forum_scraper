@@ -43,6 +43,8 @@ class FakeDiscoveryService:
             discovery_limit_reached=False,
             favorites_checked=1,
             favorites_changed=0,
+            favorites_check_completed=True,
+            favorites_check_skipped=False,
         )
 
 
@@ -109,7 +111,9 @@ def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> No
     assert exit_code == 0
     assert (
         "run completed: discovery_pages=1 discovery_topics=2 discovery_candidates=1 "
-        "discovery_completed=True favorites_checked=1 favorites_changed=0"
+        "discovery_completed=True discovery_limit_reached=False "
+        "favorites_checked=1 favorites_changed=0 favorites_check_completed=True "
+        "favorites_check_skipped=False"
     ) in output
 
 
