@@ -6,7 +6,12 @@ from alembic.config import Config
 
 from alembic import command
 from app.models import EventType, NotificationStatus
-from events.service import EventService, build_deduplication_key, stable_payload
+from events.service import (
+    EventService,
+    build_deduplication_key,
+    sanitize_error_message,
+    stable_payload,
+)
 from storage import create_sqlite_engine, session_factory, session_scope
 from storage.orm import EventORM, TopicORM
 
@@ -133,3 +138,25 @@ def test_payload_is_stored_deterministically(tmp_path: Path) -> None:
         assert created is True
         assert event.payload_json == {"a": {"a": 1, "b": 2}, "z": 1}
         assert event.error_message == "temporary failure"
+
+
+def test_sanitize_error_message_redacts_secrets_and_html() -> None:
+    cases = (
+        OSError("SMTP password=abc"),
+        RuntimeError("Authorization: Bearer secret-token"),
+        RuntimeError("OPENAI_API_KEY=sk-secret"),
+        RuntimeError("HTTP 500 <html><body>private vendor page</body></html>"),
+        RuntimeError("Cookie: session=abc token=hidden api_key: abc secret=value"),
+    )
+
+    for case in cases:
+        sanitized = sanitize_error_message(case)
+        lowered = sanitized.lower()
+        assert "abc" not in sanitized
+        assert "secret-token" not in sanitized
+        assert "sk-secret" not in sanitized
+        assert "<html" not in lowered
+        assert "<body" not in lowered
+        assert "private vendor page" not in sanitized
+        for marker in ("OPENAI_API_KEY", "Authorization", "Cookie", "password", "token"):
+            assert marker.lower() not in lowered

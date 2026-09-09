@@ -51,9 +51,12 @@ def migrated_db_path(tmp_path: Path) -> Path:
 class FakeListingClient:
     def __init__(self) -> None:
         self.starts: list[int] = []
+        self.error: Exception | None = None
 
     def get_listing_page(self, *, start: int = 0) -> ArmasHttpResponse:
         self.starts.append(start)
+        if self.error is not None:
+            raise self.error
         return ArmasHttpResponse(
             status_code=200,
             text=f"listing:{start}",
@@ -478,7 +481,9 @@ def test_run_skips_favorites_when_disabled_by_config(tmp_path: Path) -> None:
         assert AppStateRepository(session).get("last_successful_favorites_check_at") is None
 
 
-def test_run_with_active_favorite_and_no_classifier_is_incomplete(tmp_path: Path) -> None:
+def test_run_with_active_favorite_and_no_classifier_checks_unchanged_topic(
+    tmp_path: Path,
+) -> None:
     service, _listing_client, topic_fetcher = service_for(
         tmp_path,
         config=app_config(max_pages_per_run=1),
@@ -493,12 +498,16 @@ def test_run_with_active_favorite_and_no_classifier_is_incomplete(tmp_path: Path
     result = service.run_once()
 
     with session_scope(service.session_factory) as session:
-        assert result.favorites_checked == 0
+        assert result.favorites_checked == 1
+        assert result.favorites_unchanged == 1
         assert result.favorites_changed == 0
-        assert result.favorites_check_completed is False
+        assert result.favorites_changed_unclassified == 0
+        assert result.favorites_check_completed is True
         assert result.favorites_check_skipped is False
-        assert topic_fetcher.calls == []
-        assert AppStateRepository(session).get("last_successful_favorites_check_at") is None
+        assert topic_fetcher.calls == [
+            ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
+        ]
+        assert AppStateRepository(session).get("last_successful_favorites_check_at") is not None
 
 
 def test_run_without_active_favorites_completes_check_without_fetching(tmp_path: Path) -> None:
@@ -517,6 +526,79 @@ def test_run_without_active_favorites_completes_check_without_fetching(tmp_path:
         assert result.favorites_check_skipped is False
         assert topic_fetcher.calls == []
         assert AppStateRepository(session).get("last_successful_favorites_check_at") is not None
+
+
+def test_run_listing_failure_still_processes_pending_and_favorites(
+    tmp_path: Path,
+) -> None:
+    service, listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1, ai_enabled=False),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    service.run_once()
+    service.config = app_config(max_pages_per_run=1, ai_enabled=True)
+    service.classifier = FakeClassifier(default_result=positive_result())
+    listing_client.error = RuntimeError("listing failed Authorization: Bearer abc")
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.discovery_completed is False
+        assert result.pending_candidates_checked == 1
+        assert result.pending_candidates_classified == 1
+        assert result.favorites_checked == 1
+        assert result.favorites_unchanged == 1
+        assert topic_fetcher.calls == [
+            ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100"),
+            ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100"),
+        ]
+        errors = session.query(EventORM).filter_by(event_type=EventType.ERROR.value).all()
+        assert len(errors) == 1
+        assert "Authorization" not in errors[0].error_message
+        assert "abc" not in errors[0].error_message
+
+
+def test_newly_failed_candidate_is_not_retried_twice_in_same_run(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    topic_fetcher.error = TopicFetchTransientError("temporary failure")
+
+    first = service.run_once()
+    second = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert first.discovery_candidates_seen == 1
+        assert first.pending_candidates_checked == 0
+        assert first.pending_candidates_remaining == 1
+        assert second.pending_candidates_checked == 0
+        assert len(topic_fetcher.calls) == 2
+        assert session.query(CandidateMatchORM).one().status == CandidateStatus.PENDING.value
+
+
+def test_empty_listing_with_checkpoint_does_not_spin_to_max_pages(tmp_path: Path) -> None:
+    service, listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=5),
+        pages={},
+    )
+    with session_scope(service.session_factory) as session:
+        AppStateRepository(session).set(
+            "last_successful_discovery_at",
+            datetime(2026, 1, 2, 12, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        )
+
+    result = service.run_once()
+
+    assert listing_client.starts == [0]
+    assert result.discovery_completed is True
+    assert result.discovery_limit_reached is False
 
 
 def test_run_retries_existing_pending_candidate(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from app.config import AppConfig, ConfigError, load_config, load_email_environment
-from app.models import EventType, utc_now
+from app.models import utc_now
 from classification.openai_classifier import OpenAIClassifier
 from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
 from notifications.email import EmailNotificationService, NotificationRetryResult
@@ -27,6 +27,9 @@ from storage.operational import (
     reactivate_favorite,
     read_status,
 )
+from storage.repositories import AppStateRepository
+
+LAST_SUCCESSFUL_NOTIFICATION_RUN_AT_KEY = "last_successful_notification_run_at"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,11 +38,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     config_path = args.config or "config/config.yaml"
-    config = (
-        load_config(config_path)
-        if args.command in {"bootstrap", "run", "retry-notifications", "debug-listing"}
-        else None
-    )
+    try:
+        config = (
+            load_config(config_path)
+            if args.command in {"bootstrap", "run", "retry-notifications", "debug-listing"}
+            else None
+        )
+    except ConfigError as exc:
+        print(f"configuration error: {exc}")
+        return 1
 
     if args.command == "bootstrap":
         assert config is not None
@@ -157,7 +164,9 @@ def _run(config: AppConfig, *, database: str | Path) -> int:
         f"pending_completed={result.pending_candidates_completed} "
         f"pending_skipped={result.pending_candidates_skipped} "
         f"favorites_checked={result.favorites_checked} "
+        f"favorites_unchanged={result.favorites_unchanged} "
         f"favorites_changed={result.favorites_changed} "
+        f"favorites_changed_unclassified={result.favorites_changed_unclassified} "
         f"favorites_check_errors={result.favorites_check_errors} "
         f"favorites_check_completed={result.favorites_check_completed} "
         f"favorites_check_skipped={result.favorites_check_skipped} "
@@ -180,6 +189,11 @@ def _retry_notifications(config: AppConfig, *, database: str | Path) -> int:
             email_environment=load_email_environment(),
             notifications=config.notifications,
         ).retry_pending_and_failed()
+        if result.failed == 0:
+            AppStateRepository(session).set(
+                LAST_SUCCESSFUL_NOTIFICATION_RUN_AT_KEY,
+                utc_now().isoformat().replace("+00:00", "Z"),
+            )
 
     print(
         "retry-notifications completed: "
@@ -192,16 +206,35 @@ def _send_notifications(config: AppConfig, *, database: str | Path) -> Notificat
     engine = create_sqlite_engine(database)
     factory = session_factory(engine)
     with session_scope(factory) as session:
-        return EmailNotificationService(
+        result = EmailNotificationService(
             session=session,
             email_environment=load_email_environment(),
             notifications=config.notifications,
         ).retry_pending_and_failed()
+        if result.failed == 0:
+            AppStateRepository(session).set(
+                LAST_SUCCESSFUL_NOTIFICATION_RUN_AT_KEY,
+                utc_now().isoformat().replace("+00:00", "Z"),
+            )
+        return result
 
 
 def _status(*, database: str | Path, config_path: str | None) -> int:
     run_migrations(database)
-    notify_event_types = _status_notify_event_types(config_path)
+    try:
+        status_config = load_config(config_path) if config_path is not None else None
+    except ConfigError as exc:
+        print(f"configuration error: {exc}")
+        return 1
+    notify_event_types = (
+        status_config.notifications.notify_event_types if status_config is not None else None
+    )
+    source_summary = (
+        f"{status_config.source.type} base_url={status_config.source.base_url} "
+        f"forum_id={status_config.source.forum_id}"
+        if status_config is not None
+        else "unconfigured"
+    )
     engine = create_sqlite_engine(database)
     factory = session_factory(engine)
     with session_scope(factory) as session:
@@ -216,7 +249,12 @@ def _status(*, database: str | Path, config_path: str | None) -> int:
         f"events_pending={status.events_pending} events_failed={status.events_failed} "
         f"events_sent={status.events_sent} "
         f"events_pending_non_notifiable={status.events_pending_non_notifiable} "
-        f"events_failed_non_notifiable={status.events_failed_non_notifiable}"
+        f"events_failed_non_notifiable={status.events_failed_non_notifiable} "
+        f"last_discovery={status.last_successful_discovery_at or '-'} "
+        f"last_favorites_check={status.last_successful_favorites_check_at or '-'} "
+        f"last_notifications={status.last_notification_run_at or '-'} "
+        f"backlog_pending={status.pending_candidates > 0} "
+        f"source={source_summary}"
     )
     for key, value in status.state:
         print(f"state: {key}={value}")
@@ -309,13 +347,6 @@ def _backup(*, database: str | Path, destination: str | Path | None) -> int:
     )
     print(f"backup completed: {backup_path}")
     return 0
-
-
-def _status_notify_event_types(config_path: str | None) -> tuple[EventType, ...] | None:
-    if config_path is None:
-        return None
-    return load_config(config_path).notifications.notify_event_types
-
 
 def _default_backup_destination() -> Path:
     timestamp = utc_now().strftime("%Y%m%d-%H%M%S")

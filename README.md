@@ -101,7 +101,9 @@ reenviar eventos `PENDING` o `FAILED`.
 `python -m app status` puede ejecutarse sin YAML para inspeccionar una base de datos. Si
 se pasa `--config`, los contadores `events_pending` y `events_failed` reflejan solo
 eventos accionables para `notifications.notify_event_types`; los excluidos aparecen en
-`events_pending_non_notifiable` y `events_failed_non_notifiable`.
+`events_pending_non_notifiable` y `events_failed_non_notifiable`. La salida incluye tambien
+la fuente activa cuando hay configuracion, favoritos activos, backlog pendiente y los ultimos
+checkpoints conocidos de discovery, favoritos y notificaciones.
 
 `python -m app backup` sin ruta crea una copia consistente con nombre
 `backups/monitor-YYYYMMDD-HHMMSS.db` y evita sobrescribir colisiones en el mismo segundo

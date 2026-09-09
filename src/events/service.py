@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -11,6 +12,18 @@ from app.models import EventType
 from storage.orm import EventORM
 from storage.repositories import EventRepository
 from storage.types import JsonPayload
+
+MAX_ERROR_MESSAGE_LENGTH = 1000
+_HTML_PATTERN = re.compile(
+    r"<(?:!doctype|/?html\b|/?body\b|/?head\b|/?div\b|/?span\b|/?script\b)[^>]*>",
+    re.I,
+)
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"\b(OPENAI_API_KEY|Authorization|Cookie|password|token|api_key|secret)\b"
+    r"\s*[:=]\s*([^\s,;]+)",
+    re.I,
+)
+_AUTH_TOKEN_PATTERN = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.I)
 
 
 def build_deduplication_key(
@@ -35,6 +48,41 @@ def stable_payload(payload: JsonPayload | None) -> JsonPayload | None:
     if payload is None:
         return None
     return _normalize_payload(payload)
+
+
+def sanitize_error_message(error: BaseException | str) -> str:
+    """Return a short persisted-safe error message without secrets or raw HTML."""
+
+    try:
+        if isinstance(error, BaseException):
+            text = str(error).strip() or error.__class__.__name__
+        else:
+            text = str(error)
+    except Exception:
+        text = "unprintable error"
+
+    if _HTML_PATTERN.search(text):
+        text = _HTML_PATTERN.sub("[html removed]", text)
+        text = re.sub(r"\[html removed\].*", "[html removed]", text, flags=re.I)
+    else:
+        text = _HTML_PATTERN.sub("[html removed]", text)
+    text = re.sub(r"<[^>]{1,200}>", "[html removed]", text)
+    text = _AUTH_TOKEN_PATTERN.sub(r"\1 [redacted]", text)
+    text = _SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}=[redacted]", text)
+    for marker in (
+        "OPENAI_API_KEY",
+        "Authorization",
+        "Cookie",
+        "password",
+        "token",
+        "api_key",
+        "secret",
+    ):
+        text = re.sub(rf"\b{re.escape(marker)}\b", "[redacted]", text, flags=re.I)
+    text = " ".join(text.split())
+    if not text:
+        text = "empty error"
+    return text[:MAX_ERROR_MESSAGE_LENGTH]
 
 
 class EventService:
@@ -67,7 +115,7 @@ class EventService:
             payload=stable_payload(payload),
         )
         if created and error_message is not None:
-            event.error_message = error_message
+            event.error_message = sanitize_error_message(error_message)
         return event, created
 
     def emit_for_topic(

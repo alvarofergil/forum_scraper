@@ -75,7 +75,7 @@ class ScrapingConfig:
 class AiConfig:
     """AI classification configuration."""
 
-    enabled: bool = True
+    enabled: bool = False
     model: str | None = None
     match_confidence_threshold: float = 0.85
 
@@ -222,14 +222,17 @@ def _parse_scraping(data: Mapping[str, Any]) -> ScrapingConfig:
 
 
 def _parse_ai(data: Mapping[str, Any]) -> AiConfig:
+    enabled = _bool(data.get("enabled", False), "ai.enabled")
     model = data.get("model")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ConfigError("ai.model must be a string or null")
     if isinstance(model, str):
         model = model.strip()
+    if enabled and model is None:
+        raise ConfigError("ai.model must be configured when ai.enabled=true")
 
     return AiConfig(
-        enabled=_bool(data.get("enabled", True), "ai.enabled"),
+        enabled=enabled,
         model=model,
         match_confidence_threshold=_confidence(
             data.get("match_confidence_threshold", 0.85),

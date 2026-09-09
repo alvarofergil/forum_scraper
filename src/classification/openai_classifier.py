@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.config import AiConfig, ConfigError
-from app.models import ParsedTopic, WatchItem
+from app.models import AvailabilityStatus, ListingType, ParsedTopic, WatchItem
 from classification.base import (
     ClassificationContext,
     ClassificationResult,
@@ -20,7 +20,34 @@ from classification.base import (
 class OpenAIClassifier:
     """Classify forum topics through an injected or lazily-created OpenAI client."""
 
-    response_schema = ClassificationResult.model_json_schema()
+    response_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "matches_watch_item": {"type": "boolean"},
+            "listing_type": {"type": "string", "enum": [item.value for item in ListingType]},
+            "availability": {
+                "type": "string",
+                "enum": [item.value for item in AvailabilityStatus],
+            },
+            "price": {"type": ["number", "null"]},
+            "currency": {"type": ["string", "null"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": [
+            "matches_watch_item",
+            "listing_type",
+            "availability",
+            "price",
+            "currency",
+            "confidence",
+            "evidence",
+        ],
+    }
 
     def __init__(self, *, model: str, client: Any | None = None) -> None:
         if not model.strip():
@@ -122,8 +149,8 @@ class OpenAIClassifier:
             raise ConfigError("OpenAI response was not valid JSON") from exc
         try:
             return ClassificationResult.model_validate(data)
-        except ValidationError:
-            raise
+        except ValidationError as exc:
+            raise ConfigError("OpenAI response did not match classification schema") from exc
 
     @staticmethod
     def _watch_item_payload(watch_item: WatchItem) -> dict[str, object]:

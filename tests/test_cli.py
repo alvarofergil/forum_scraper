@@ -52,7 +52,9 @@ class FakeDiscoveryService:
             pending_candidates_completed=True,
             pending_candidates_skipped=False,
             favorites_checked=1,
+            favorites_unchanged=1,
             favorites_changed=0,
+            favorites_changed_unclassified=0,
             favorites_check_errors=0,
             favorites_check_completed=True,
             favorites_check_skipped=False,
@@ -147,7 +149,8 @@ def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> No
         "discovery_completed=True discovery_limit_reached=False "
         "pending_checked=0 pending_classified=0 pending_discarded=0 "
         "pending_failed=0 pending_remaining=0 pending_completed=True "
-        "pending_skipped=False favorites_checked=1 favorites_changed=0 "
+        "pending_skipped=False favorites_checked=1 favorites_unchanged=1 "
+        "favorites_changed=0 favorites_changed_unclassified=0 "
         "favorites_check_errors=0 favorites_check_completed=True "
         "favorites_check_skipped=False notifications_skipped=email_disabled"
     ) in output

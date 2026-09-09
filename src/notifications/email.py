@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import EmailEnvironment, NotificationsConfig
 from app.models import EventType, NotificationStatus, utc_now
+from events.service import sanitize_error_message
 from storage.orm import EventORM
 
 
@@ -105,7 +106,7 @@ class EmailNotificationService:
                 self._send_event(event)
             except Exception as exc:
                 event.notification_status = NotificationStatus.FAILED.value
-                event.error_message = _safe_error_message(exc)
+                event.error_message = sanitize_error_message(exc)
                 failed += 1
             else:
                 event.notification_status = NotificationStatus.SENT.value
@@ -165,10 +166,3 @@ def _event_body(event: EventORM) -> str:
             ]
         )
     return "\n".join(lines)
-
-
-def _safe_error_message(exc: Exception) -> str:
-    message = str(exc).strip()
-    if not message:
-        return exc.__class__.__name__
-    return message[:1000]

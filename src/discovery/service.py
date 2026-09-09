@@ -23,7 +23,7 @@ from app.models import (
 )
 from classification.base import ClassificationResult, ListingClassifier
 from discovery.matcher import match_listing
-from events.service import EventService
+from events.service import EventService, sanitize_error_message
 from favorites.service import FavoriteService
 from sources.armas_es.client import ArmasEsClient
 from sources.armas_es.listing_parser import ParsedListingPage, parse_listing_page
@@ -81,7 +81,9 @@ class RunResult:
     pending_candidates_completed: bool
     pending_candidates_skipped: bool
     favorites_checked: int
+    favorites_unchanged: int
     favorites_changed: int
+    favorites_changed_unclassified: int
     favorites_check_errors: int
     favorites_check_completed: bool
     favorites_check_skipped: bool
@@ -137,8 +139,9 @@ class DiscoveryService:
         """Run one bounded incremental discovery pass followed by favorites check."""
 
         started_at = utc_now()
-        discovery = self._run_incremental_discovery(started_at)
-        pending = self._process_pending_candidates()
+        attempted_candidate_ids: set[int] = set()
+        discovery = self._run_incremental_discovery(started_at, attempted_candidate_ids)
+        pending = self._process_pending_candidates(exclude_candidate_ids=attempted_candidate_ids)
         favorites = self._run_favorites_check(started_at)
         return RunResult(
             discovery_pages_seen=discovery.pages_seen,
@@ -154,15 +157,22 @@ class DiscoveryService:
             pending_candidates_completed=pending.completed,
             pending_candidates_skipped=pending.skipped,
             favorites_checked=favorites.checked,
+            favorites_unchanged=favorites.unchanged,
             favorites_changed=favorites.changed,
+            favorites_changed_unclassified=favorites.changed_unclassified,
             favorites_check_errors=favorites.errors,
             favorites_check_completed=favorites.completed,
             favorites_check_skipped=favorites.skipped,
         )
 
-    def _run_incremental_discovery(self, started_at: datetime) -> _DiscoveryRunCounters:
+    def _run_incremental_discovery(
+        self,
+        started_at: datetime,
+        attempted_candidate_ids: set[int] | None = None,
+    ) -> _DiscoveryRunCounters:
         with session_scope(self.session_factory) as session:
             state = AppStateRepository(session)
+            events = EventService(session)
             previous_checkpoint = _parse_state_datetime(
                 state.get(LAST_SUCCESSFUL_DISCOVERY_AT_KEY)
             )
@@ -178,18 +188,40 @@ class DiscoveryService:
             counters = _DiscoveryRunCounters()
             current_start = 0
             for _page_number in range(self.config.discovery.max_pages_per_run):
-                response = self.listing_client.get_listing_page(start=current_start)
-                parsed_page = self.listing_parser(
-                    response.text,
-                    base_url=self.config.source.base_url,
-                    forum_id=self.config.source.forum_id,
-                    current_start=current_start,
-                )
+                try:
+                    response = self.listing_client.get_listing_page(start=current_start)
+                    parsed_page = self.listing_parser(
+                        response.text,
+                        base_url=self.config.source.base_url,
+                        forum_id=self.config.source.forum_id,
+                        current_start=current_start,
+                    )
+                except Exception as exc:
+                    counters.completed = False
+                    _emit_error(
+                        events,
+                        topic_external_id=f"listing-start-{current_start}",
+                        topic_id=None,
+                        watch_item_id="discovery",
+                        scope="incremental_listing",
+                        error=exc,
+                    )
+                    _log_warning(
+                        "discovery listing phase incomplete",
+                        extra={"current_start": current_start, "error_type": type(exc).__name__},
+                    )
+                    break
                 counters.pages_seen += 1
                 counters.topics_seen += len(parsed_page.topics)
 
                 fresh_listings = _listings_at_or_after_cutoff(parsed_page.topics, cutoff)
-                self._process_listings(session, fresh_listings, counters)
+                self._process_listings(
+                    session,
+                    fresh_listings,
+                    counters,
+                    attempted_candidate_ids=attempted_candidate_ids,
+                    events=events,
+                )
                 if _page_reached_cutoff(parsed_page.topics, cutoff):
                     counters.completed = True
                     break
@@ -218,7 +250,9 @@ class DiscoveryService:
         if not self.config.favorites.check_every_run:
             return _FavoriteCheckResult(
                 checked=0,
+                unchanged=0,
                 changed=0,
+                changed_unclassified=0,
                 errors=0,
                 completed=False,
                 skipped=True,
@@ -237,22 +271,11 @@ class DiscoveryService:
                 )
                 return _FavoriteCheckResult(
                     checked=0,
+                    unchanged=0,
                     changed=0,
+                    changed_unclassified=0,
                     errors=0,
                     completed=True,
-                    skipped=False,
-                )
-
-            if self.classifier is None:
-                _log_warning(
-                    "favorites check incomplete because classifier is unavailable",
-                    extra={"active_favorites": len(favorites)},
-                )
-                return _FavoriteCheckResult(
-                    checked=0,
-                    changed=0,
-                    errors=0,
-                    completed=False,
                     skipped=False,
                 )
 
@@ -264,7 +287,9 @@ class DiscoveryService:
                 ai_config=self.config.ai,
             )
             checked = 0
+            unchanged = 0
             changed = 0
+            changed_unclassified = 0
             errors = 0
             for favorite in favorites:
                 watch_item = watch_items.get(favorite.watch_item_id)
@@ -273,6 +298,10 @@ class DiscoveryService:
                 checked += 1
                 if service.check_favorite(favorite.id, watch_item=watch_item):
                     changed += 1
+                if service.last_check_was_unchanged:
+                    unchanged += 1
+                if service.last_check_changed_without_classifier:
+                    changed_unclassified += 1
                 if service.last_check_had_error:
                     errors += 1
 
@@ -284,13 +313,19 @@ class DiscoveryService:
                 )
             return _FavoriteCheckResult(
                 checked=checked,
+                unchanged=unchanged,
                 changed=changed,
+                changed_unclassified=changed_unclassified,
                 errors=errors,
                 completed=completed,
                 skipped=False,
             )
 
-    def _process_pending_candidates(self) -> _PendingCandidateCounters:
+    def _process_pending_candidates(
+        self,
+        *,
+        exclude_candidate_ids: set[int] | None = None,
+    ) -> _PendingCandidateCounters:
         with session_scope(self.session_factory) as session:
             candidates = CandidateMatchRepository(session)
             pending_count = candidates.count_pending()
@@ -308,8 +343,11 @@ class DiscoveryService:
             watch_items = {item.id: item for item in self.config.watchlist}
             favorites = FavoriteService(session, ai_config=self.config.ai)
             events = EventService(session)
+            exclude_candidate_ids = exclude_candidate_ids or set()
 
             for candidate in candidates.list_pending(limit=DEFAULT_PENDING_CANDIDATE_BATCH_SIZE):
+                if candidate.id in exclude_candidate_ids:
+                    continue
                 counters.checked += 1
                 topic = candidate.topic
                 watch_item = watch_items.get(candidate.watch_item_id)
@@ -368,6 +406,9 @@ class DiscoveryService:
         session: Session,
         listings: tuple[TopicListing, ...],
         counters: _BootstrapCounters,
+        *,
+        attempted_candidate_ids: set[int] | None = None,
+        events: EventService | None = None,
     ) -> None:
         topics = TopicRepository(session)
         candidates = CandidateMatchRepository(session)
@@ -396,8 +437,15 @@ class DiscoveryService:
                         counters.pending_candidates += 1
                     continue
 
-                classified = self._fetch_and_classify(listing, cheap_match.watch_item)
+                classified = self._fetch_and_classify(
+                    listing,
+                    cheap_match.watch_item,
+                    topic_id=topic_row.id,
+                    events=events,
+                )
                 if classified is None:
+                    if attempted_candidate_ids is not None:
+                        attempted_candidate_ids.add(candidate.id)
                     if created:
                         counters.pending_candidates += 1
                     continue
@@ -422,6 +470,9 @@ class DiscoveryService:
         self,
         listing: TopicListing,
         watch_item: WatchItem,
+        *,
+        topic_id: int | None = None,
+        events: EventService | None = None,
     ) -> tuple[ParsedTopic, ClassificationResult] | None:
         if self.classifier is None:
             raise ValueError("classifier is required to classify candidates")
@@ -431,7 +482,16 @@ class DiscoveryService:
                 canonical_url=listing.canonical_url,
             )
             result = self.classifier.classify_new_candidate(watch_item, parsed_topic)
-        except Exception:
+        except Exception as exc:
+            if events is not None:
+                _emit_error(
+                    events,
+                    topic_external_id=listing.external_topic_id,
+                    topic_id=topic_id,
+                    watch_item_id=watch_item.id,
+                    scope="discovery_candidate_classification",
+                    error=exc,
+                )
             return None
         return parsed_topic, result
 
@@ -479,7 +539,9 @@ class _PendingCandidateCounters:
 @dataclass(frozen=True, slots=True)
 class _FavoriteCheckResult:
     checked: int
+    unchanged: int
     changed: int
+    changed_unclassified: int
     errors: int
     completed: bool
     skipped: bool
@@ -508,15 +570,8 @@ def _emit_error(
             "scope": scope,
             "error_type": type(error).__name__,
         },
-        error_message=_safe_error_message(error),
+        error_message=sanitize_error_message(error),
     )
-
-
-def _safe_error_message(error: Exception) -> str:
-    message = f"{type(error).__name__}: {error}"
-    for marker in ("OPENAI_API_KEY", "Authorization", "Cookie", "password", "token"):
-        message = message.replace(marker, "[redacted]")
-    return message[:1000]
 
 
 def _log_warning(message: str, *, extra: dict[str, object]) -> None:
@@ -570,8 +625,10 @@ def _page_reached_cutoff(
     listings: tuple[TopicListing, ...],
     cutoff: datetime | None,
 ) -> bool:
+    if not listings:
+        return True
     if cutoff is None:
-        return not listings
+        return False
     return any(
         listing.last_activity_at is not None and listing.last_activity_at < cutoff
         for listing in listings

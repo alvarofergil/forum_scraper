@@ -52,7 +52,7 @@ class TopicORM(Base):
         back_populates="topic",
         cascade="all, delete-orphan",
     )
-    favorite: Mapped[FavoriteORM | None] = relationship(back_populates="topic")
+    favorites: Mapped[list[FavoriteORM]] = relationship(back_populates="topic")
     posts: Mapped[list[TopicPostORM]] = relationship(
         back_populates="topic",
         cascade="all, delete-orphan",
@@ -95,6 +95,7 @@ class FavoriteORM(Base):
 
     __tablename__ = "favorites"
     __table_args__ = (
+        UniqueConstraint("topic_id", "watch_item_id", name="uq_favorites_topic_watch_item"),
         CheckConstraint(
             "status IN ('AVAILABLE', 'RESERVED', 'SOLD', 'WITHDRAWN', 'UNKNOWN')",
             name="ck_favorites_status",
@@ -109,7 +110,6 @@ class FavoriteORM(Base):
     topic_id: Mapped[int] = mapped_column(
         ForeignKey("topics.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
     )
     watch_item_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     status: Mapped[str] = mapped_column(
@@ -132,7 +132,7 @@ class FavoriteORM(Base):
         onupdate=utc_now,
     )
 
-    topic: Mapped[TopicORM] = relationship(back_populates="favorite")
+    topic: Mapped[TopicORM] = relationship(back_populates="favorites")
     price_history: Mapped[list[PriceHistoryORM]] = relationship(
         back_populates="favorite",
         cascade="all, delete-orphan",
