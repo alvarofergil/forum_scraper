@@ -91,3 +91,13 @@ def test_example_config_and_readme_use_no_ai_by_default() -> None:
     assert "OPENAI_API_KEY" in readme
     assert "API key por si sola" in readme
     assert "no basta" in readme
+
+
+def test_final_acceptance_includes_task_026_contracts() -> None:
+    readme = read_text("README.md")
+    task = read_text("SPECs/task_specs/TASK-026_global_quality_audit_remediation.md")
+
+    assert "ai.model` no nulo" in readme
+    assert "ultimos\ncheckpoints conocidos" in readme
+    assert "OpenAI Structured Outputs" in task
+    assert "un favorito debe representar el par `topic_id + watch_item_id`" in task

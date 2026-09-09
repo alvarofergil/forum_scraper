@@ -34,7 +34,7 @@ scraping:
   max_retries: 3
 ai:
   enabled: true
-  model: null
+  model: "gpt-test"
   match_confidence_threshold: 0.85
 notifications:
   email_enabled: true
@@ -57,7 +57,7 @@ watchlist:
     assert config.source.type == "armas_es"
     assert config.source.forum_id == 96
     assert config.bootstrap.pages == 10
-    assert config.ai.model is None
+    assert config.ai.model == "gpt-test"
     assert config.ai.match_confidence_threshold == 0.85
     assert config.notifications.notify_event_types == (
         EventType.NEW_FAVORITE,
@@ -178,6 +178,28 @@ watchlist:
 
     assert config.ai.enabled is False
     assert config.ai.model is None
+
+
+def test_ai_enabled_requires_model(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+source:
+  type: armas_es
+  base_url: "https://www.armas.es"
+  forum_id: 96
+ai:
+  enabled: true
+  model: null
+watchlist:
+  - id: item_001
+    brand: "Marca A"
+    model: "Modelo X"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="ai.model must be configured"):
+        load_config(config_path)
 
 
 def test_empty_ai_model_is_rejected(tmp_path: Path) -> None:

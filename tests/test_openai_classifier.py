@@ -4,7 +4,6 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
 
 from app.config import AiConfig, ConfigError
 from app.models import AvailabilityStatus, ListingType, ParsedTopic, TopicPost, WatchItem
@@ -123,6 +122,31 @@ def test_classify_new_candidate_uses_configured_model_and_schema() -> None:
     assert result.availability == AvailabilityStatus.AVAILABLE
 
 
+def test_openai_classifier_uses_strict_supported_schema() -> None:
+    client = FakeOpenAIClient(valid_output())
+    classifier = OpenAIClassifier(model="gpt-test", client=client)
+
+    classifier.classify_new_candidate(watch_item(), topic_with_html_markers())
+
+    call = client.responses.calls[0]
+    text_format = call["text"]["format"]
+    schema = text_format["schema"]
+    assert text_format["strict"] is True
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "matches_watch_item",
+        "listing_type",
+        "availability",
+        "price",
+        "currency",
+        "confidence",
+        "evidence",
+    }
+    assert schema["properties"]["price"]["type"] == ["number", "null"]
+    assert schema["properties"]["currency"]["type"] == ["string", "null"]
+    assert schema["properties"]["evidence"]["type"] == "array"
+
+
 def test_classification_input_is_structured_and_does_not_send_html() -> None:
     client = FakeOpenAIClient(valid_output())
     classifier = OpenAIClassifier(model="gpt-test", client=client)
@@ -173,9 +197,17 @@ def test_classify_favorite_update_includes_previous_state() -> None:
     assert "old-hash" in payload_text
 
 
-def test_invalid_openai_output_is_rejected() -> None:
-    client = FakeOpenAIClient('{"matches_watch_item": true, "availability": "BROKEN"}')
+def test_openai_classifier_rejects_invalid_output_without_leaking_raw_response() -> None:
+    raw_response = (
+        '{"matches_watch_item": true, "availability": "BROKEN", '
+        '"evidence": ["very long third party response"]}'
+    )
+    client = FakeOpenAIClient(raw_response)
     classifier = OpenAIClassifier(model="gpt-test", client=client)
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ConfigError) as exc_info:
         classifier.classify_new_candidate(watch_item(), topic_with_html_markers())
+
+    assert "did not match classification schema" in str(exc_info.value)
+    assert "BROKEN" not in str(exc_info.value)
+    assert "very long third party response" not in str(exc_info.value)

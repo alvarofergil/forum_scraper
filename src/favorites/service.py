@@ -21,7 +21,7 @@ from app.models import (
 )
 from classification.base import ClassificationResult, ListingClassifier, PreviousFavoriteState
 from discovery.matcher import normalize_text
-from events.service import EventService
+from events.service import EventService, sanitize_error_message
 from sources.base import (
     TopicFetcher,
     TopicFetchNotFoundError,
@@ -82,6 +82,8 @@ class FavoriteService:
         self.ai_config = ai_config or AiConfig()
         self.events = events or EventService(session)
         self.last_check_had_error = False
+        self.last_check_was_unchanged = False
+        self.last_check_changed_without_classifier = False
 
     def create_from_classification(
         self,
@@ -98,7 +100,10 @@ class FavoriteService:
 
         topic_row = self._get_or_create_topic(topic, canonical_url=canonical_url)
         existing = self.session.scalar(
-            select(FavoriteORM).where(FavoriteORM.topic_id == topic_row.id)
+            select(FavoriteORM).where(
+                FavoriteORM.topic_id == topic_row.id,
+                FavoriteORM.watch_item_id == watch_item.id,
+            )
         )
         if existing is not None:
             return existing, False
@@ -147,11 +152,13 @@ class FavoriteService:
         """Fetch and classify a favorite only when its stable content hash changed."""
 
         self.last_check_had_error = False
+        self.last_check_was_unchanged = False
+        self.last_check_changed_without_classifier = False
         favorite = self.session.get(FavoriteORM, favorite_id)
         if favorite is None or favorite.topic is None or not favorite.is_active:
             return False
-        if self.topic_fetcher is None or self.classifier is None:
-            raise ValueError("topic_fetcher and classifier are required to check favorites")
+        if self.topic_fetcher is None:
+            raise ValueError("topic_fetcher is required to check favorites")
 
         try:
             parsed_topic = self.topic_fetcher.fetch_topic(
@@ -160,8 +167,18 @@ class FavoriteService:
             )
         except (TopicFetchNotFoundError, TopicFetchUnavailableError):
             return self._record_unavailable_attempt(favorite)
-        except TopicFetchRecoverableError:
-            favorite.last_checked_at = utc_now()
+        except TopicFetchRecoverableError as exc:
+            self.last_check_had_error = True
+            _emit_error(
+                self.events,
+                topic_external_id=favorite.topic.external_topic_id,
+                topic_id=favorite.topic_id,
+                favorite_id=favorite.id,
+                watch_item_id=watch_item.id,
+                scope="favorite_update_fetch",
+                content_hash=favorite.last_content_hash or "unfetched",
+                error=exc,
+            )
             return False
 
         content_hash = compute_content_hash(parsed_topic)
@@ -169,6 +186,21 @@ class FavoriteService:
         favorite.unavailable_confirmation_count = 0
         self._record_posts(favorite.topic, parsed_topic)
         if content_hash == favorite.last_content_hash:
+            self.last_check_was_unchanged = True
+            return False
+        if self.classifier is None:
+            self.last_check_had_error = True
+            self.last_check_changed_without_classifier = True
+            _emit_error(
+                self.events,
+                topic_external_id=favorite.topic.external_topic_id,
+                topic_id=favorite.topic_id,
+                favorite_id=favorite.id,
+                watch_item_id=watch_item.id,
+                scope="favorite_update_missing_classifier",
+                content_hash=content_hash,
+                error=RuntimeError("classifier unavailable for changed favorite"),
+            )
             return False
 
         previous = PreviousFavoriteState(
@@ -391,12 +423,5 @@ def _emit_error(
             "scope": scope,
             "error_type": type(error).__name__,
         },
-        error_message=_safe_error_message(error),
+        error_message=sanitize_error_message(error),
     )
-
-
-def _safe_error_message(error: Exception) -> str:
-    message = f"{type(error).__name__}: {error}"
-    for marker in ("OPENAI_API_KEY", "Authorization", "Cookie", "password", "token"):
-        message = message.replace(marker, "[redacted]")
-    return message[:1000]

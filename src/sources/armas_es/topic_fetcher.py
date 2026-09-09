@@ -27,7 +27,7 @@ from sources.base import (
     TopicFetchUnavailableError,
 )
 
-TopicParser = Callable[[str], ParsedTopic]
+TopicParser = Callable[..., ParsedTopic]
 
 
 class ArmasEsTopicFetcher:
@@ -99,7 +99,11 @@ class ArmasEsTopicFetcher:
     def _fetch_and_parse(self, url: str) -> ParsedTopic:
         try:
             response = self.client.get(url)
-            return self.parser(response.text)
+            return self.parser(
+                response.text,
+                base_url=self.base_url,
+                forum_id=self.forum_id,
+            )
         except ArmasTopicNotFoundError as exc:
             raise TopicFetchNotFoundError("topic not found") from exc
         except ArmasTopicUnavailableError as exc:

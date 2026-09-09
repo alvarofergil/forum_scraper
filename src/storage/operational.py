@@ -28,6 +28,9 @@ class OperationalStatus:
     events_sent: int
     events_pending_non_notifiable: int
     events_failed_non_notifiable: int
+    last_successful_discovery_at: str | None
+    last_successful_favorites_check_at: str | None
+    last_notification_run_at: str | None
     state: tuple[tuple[str, str], ...]
 
 
@@ -91,6 +94,11 @@ def read_status(
         pending_non_notifiable = pending_total - pending_actionable
         failed_non_notifiable = failed_total - failed_actionable
 
+    state_rows = tuple(
+        session.execute(select(AppStateORM.key, AppStateORM.value).order_by(AppStateORM.key))
+    )
+    state_values = dict(state_rows)
+
     return OperationalStatus(
         topics=_count(session, TopicORM),
         favorites=_count(session, FavoriteORM),
@@ -106,9 +114,10 @@ def read_status(
         events_sent=_event_count(session, NotificationStatus.SENT),
         events_pending_non_notifiable=pending_non_notifiable,
         events_failed_non_notifiable=failed_non_notifiable,
-        state=tuple(
-            session.execute(select(AppStateORM.key, AppStateORM.value).order_by(AppStateORM.key))
-        ),
+        last_successful_discovery_at=state_values.get("last_successful_discovery_at"),
+        last_successful_favorites_check_at=state_values.get("last_successful_favorites_check_at"),
+        last_notification_run_at=state_values.get("last_successful_notification_run_at"),
+        state=state_rows,
     )
 
 
@@ -130,7 +139,9 @@ def inspect_topic(session: Session, topic_identifier: str) -> TopicInspection | 
     if topic is None:
         return None
 
-    favorite = session.scalar(select(FavoriteORM).where(FavoriteORM.topic_id == topic.id))
+    favorite = session.scalars(
+        select(FavoriteORM).where(FavoriteORM.topic_id == topic.id).order_by(FavoriteORM.id)
+    ).first()
     events = tuple(
         session.scalars(
             select(EventORM)
@@ -236,7 +247,9 @@ def _favorite_by_topic_identifier(
     topic = _topic_by_identifier(session, topic_identifier)
     if topic is None:
         return None
-    return session.scalar(select(FavoriteORM).where(FavoriteORM.topic_id == topic.id))
+    return session.scalars(
+        select(FavoriteORM).where(FavoriteORM.topic_id == topic.id).order_by(FavoriteORM.id)
+    ).first()
 
 
 def _favorite_summary(favorite: FavoriteORM, topic: TopicORM) -> FavoriteSummary:

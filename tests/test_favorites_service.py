@@ -180,6 +180,45 @@ def test_create_favorite_is_idempotent_for_same_topic(tmp_path: Path) -> None:
         assert session.query(EventORM).count() == 1
 
 
+def test_same_topic_matching_two_watch_items_preserves_watch_context(tmp_path: Path) -> None:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    second_watch = WatchItem(id="item_002", brand="Acme", model="Target Pro", aliases=("ATP",))
+
+    with session_scope(factory) as session:
+        service = FavoriteService(session)
+
+        first, first_created = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=topic(),
+            result=positive_result(),
+            canonical_url=canonical_url(),
+        )
+        second, second_created = service.create_from_classification(
+            watch_item=second_watch,
+            topic=topic(),
+            result=positive_result(),
+            canonical_url=canonical_url(),
+        )
+        repeated, repeated_created = service.create_from_classification(
+            watch_item=second_watch,
+            topic=topic(),
+            result=positive_result(),
+            canonical_url=canonical_url(),
+        )
+
+        assert first.id != second.id
+        assert first_created is True
+        assert second_created is True
+        assert repeated.id == second.id
+        assert repeated_created is False
+        assert session.query(FavoriteORM).count() == 2
+        assert {event.watch_item_id for event in session.query(EventORM)} == {
+            "item_001",
+            "item_002",
+        }
+
+
 def test_non_offer_or_non_match_does_not_create_favorite(tmp_path: Path) -> None:
     engine = create_sqlite_engine(migrated_db_path(tmp_path))
     factory = session_factory(engine)
@@ -287,7 +326,7 @@ def test_check_unchanged_favorite_does_not_call_classifier(tmp_path: Path) -> No
         assert session.query(EventORM).count() == 1
 
 
-def test_transient_topic_fetch_error_does_not_change_availability_or_emit_events(
+def test_transient_topic_fetch_error_does_not_change_availability_and_emits_error(
     tmp_path: Path,
 ) -> None:
     engine = create_sqlite_engine(migrated_db_path(tmp_path))
@@ -315,7 +354,65 @@ def test_transient_topic_fetch_error_does_not_change_availability_or_emit_events
         assert favorite.unavailable_confirmation_count == 0
         assert favorite.is_active is True
         assert favorite.status == AvailabilityStatus.AVAILABLE.value
-        assert session.query(EventORM).count() == 1
+        assert session.query(EventORM).count() == 2
+        error = session.query(EventORM).filter_by(event_type=EventType.ERROR.value).one()
+        assert "temporary failure" in error.error_message
+
+
+def test_favorites_check_runs_without_classifier_for_unchanged_topic(tmp_path: Path) -> None:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    fetcher = FakeTopicFetcher()
+
+    with session_scope(factory) as session:
+        service = FavoriteService(session, topic_fetcher=fetcher, classifier=None)
+        favorite, _ = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=topic(),
+            result=positive_result(price=123),
+            canonical_url=canonical_url(),
+        )
+
+        changed = service.check_favorite(favorite.id, watch_item=watch_item())
+
+        assert changed is False
+        assert service.last_check_was_unchanged is True
+        assert service.last_check_had_error is False
+        assert fetcher.calls == [f"123|{canonical_url()}"]
+        assert session.query(EventORM).filter_by(event_type=EventType.ERROR.value).count() == 0
+
+
+def test_favorites_check_without_classifier_marks_changed_topic_incomplete(
+    tmp_path: Path,
+) -> None:
+    engine = create_sqlite_engine(migrated_db_path(tmp_path))
+    factory = session_factory(engine)
+    changed_topic = topic(text="Acme Target Pro rebajada a 100 EUR", post_id="789")
+    fetcher = FakeTopicFetcher(changed_topic)
+
+    with session_scope(factory) as session:
+        service = FavoriteService(session, topic_fetcher=fetcher, classifier=None)
+        favorite, _ = service.create_from_classification(
+            watch_item=watch_item(),
+            topic=topic(),
+            result=positive_result(price=123),
+            canonical_url=canonical_url(),
+        )
+        original_hash = favorite.last_content_hash
+        original_classified_at = favorite.last_classified_at
+
+        changed = service.check_favorite(favorite.id, watch_item=watch_item())
+
+        assert changed is False
+        assert service.last_check_changed_without_classifier is True
+        assert service.last_check_had_error is True
+        assert favorite.last_content_hash == original_hash
+        assert favorite.last_classified_at == original_classified_at
+        assert str(favorite.current_price) == "123.00"
+        assert favorite.status == AvailabilityStatus.AVAILABLE.value
+        assert session.query(PriceHistoryORM).count() == 1
+        assert session.query(StatusHistoryORM).count() == 1
+        assert session.query(EventORM).filter_by(event_type=EventType.ERROR.value).count() == 1
 
 
 def test_check_changed_favorite_calls_classifier_and_records_price_change(tmp_path: Path) -> None:
