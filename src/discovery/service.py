@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,11 +12,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import AppConfig
-from app.models import ListingType, ParsedTopic, TopicListing, WatchItem, utc_now
+from app.models import (
+    CandidateStatus,
+    ListingType,
+    ParsedTopic,
+    TopicListing,
+    WatchItem,
+    utc_now,
+)
 from classification.base import ClassificationResult, ListingClassifier
 from discovery.matcher import match_listing
 from favorites.service import FavoriteService
-from sources.armas_es.client import ArmasEsClient, ArmasHttpResponse
+from sources.armas_es.client import ArmasEsClient
 from sources.armas_es.listing_parser import ParsedListingPage, parse_listing_page
 from sources.base import TopicFetcher
 from storage.database import session_scope
@@ -30,6 +38,7 @@ BOOTSTRAP_COMPLETED_AT_KEY = "bootstrap_completed_at"
 LAST_SUCCESSFUL_DISCOVERY_AT_KEY = "last_successful_discovery_at"
 LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY = "last_successful_favorites_check_at"
 DEFAULT_LISTING_PAGE_SIZE = 18
+LOGGER = logging.getLogger(__name__)
 
 
 class BootstrapAlreadyCompletedError(RuntimeError):
@@ -63,6 +72,8 @@ class RunResult:
     discovery_limit_reached: bool
     favorites_checked: int
     favorites_changed: int
+    favorites_check_completed: bool
+    favorites_check_skipped: bool
 
 
 class DiscoveryService:
@@ -116,15 +127,17 @@ class DiscoveryService:
 
         started_at = utc_now()
         discovery = self._run_incremental_discovery(started_at)
-        favorites_checked, favorites_changed = self._run_favorites_check(started_at)
+        favorites = self._run_favorites_check(started_at)
         return RunResult(
             discovery_pages_seen=discovery.pages_seen,
             discovery_topics_seen=discovery.topics_seen,
             discovery_candidates_seen=discovery.candidates_seen,
             discovery_completed=discovery.completed,
             discovery_limit_reached=discovery.limit_reached,
-            favorites_checked=favorites_checked,
-            favorites_changed=favorites_changed,
+            favorites_checked=favorites.checked,
+            favorites_changed=favorites.changed,
+            favorites_check_completed=favorites.completed,
+            favorites_check_skipped=favorites.skipped,
         )
 
     def _run_incremental_discovery(self, started_at: datetime) -> _DiscoveryRunCounters:
@@ -133,9 +146,12 @@ class DiscoveryService:
             previous_checkpoint = _parse_state_datetime(
                 state.get(LAST_SUCCESSFUL_DISCOVERY_AT_KEY)
             )
+            checkpoint = previous_checkpoint or _parse_state_datetime(
+                state.get(BOOTSTRAP_COMPLETED_AT_KEY)
+            )
             cutoff = (
-                previous_checkpoint - timedelta(minutes=self.config.discovery.overlap_minutes)
-                if previous_checkpoint is not None
+                checkpoint - timedelta(minutes=self.config.discovery.overlap_minutes)
+                if checkpoint is not None
                 else None
             )
 
@@ -161,6 +177,15 @@ class DiscoveryService:
             else:
                 counters.limit_reached = True
                 counters.completed = False
+                _log_warning(
+                    "discovery reached max_pages_per_run without cutoff",
+                    extra={
+                        "current_start": current_start,
+                        "max_pages_per_run": self.config.discovery.max_pages_per_run,
+                        "checkpoint_exists": checkpoint is not None,
+                        "last_successful_discovery_at_exists": previous_checkpoint is not None,
+                    },
+                )
 
             if counters.completed:
                 state.set(
@@ -169,19 +194,29 @@ class DiscoveryService:
                 )
             return counters
 
-    def _run_favorites_check(self, started_at: datetime) -> tuple[int, int]:
+    def _run_favorites_check(self, started_at: datetime) -> _FavoriteCheckResult:
+        if not self.config.favorites.check_every_run:
+            return _FavoriteCheckResult(checked=0, changed=0, completed=False, skipped=True)
+
         with session_scope(self.session_factory) as session:
             state = AppStateRepository(session)
             watch_items = {item.id: item for item in self.config.watchlist}
             favorites = session.scalars(
                 select(FavoriteORM).where(FavoriteORM.is_active.is_(True))
             ).all()
-            if self.classifier is None:
+            if not favorites:
                 state.set(
                     LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY,
                     started_at.isoformat().replace("+00:00", "Z"),
                 )
-                return 0, 0
+                return _FavoriteCheckResult(checked=0, changed=0, completed=True, skipped=False)
+
+            if self.classifier is None:
+                _log_warning(
+                    "favorites check incomplete because classifier is unavailable",
+                    extra={"active_favorites": len(favorites)},
+                )
+                return _FavoriteCheckResult(checked=0, changed=0, completed=False, skipped=False)
 
             service = FavoriteService(
                 session,
@@ -204,7 +239,12 @@ class DiscoveryService:
                 LAST_SUCCESSFUL_FAVORITES_CHECK_AT_KEY,
                 started_at.isoformat().replace("+00:00", "Z"),
             )
-            return checked, changed
+            return _FavoriteCheckResult(
+                checked=checked,
+                changed=changed,
+                completed=True,
+                skipped=False,
+            )
 
     def _process_listings(
         self,
@@ -225,6 +265,11 @@ class DiscoveryService:
                     topic_id=topic_row.id,
                     watch_item_id=cheap_match.watch_item.id,
                 )
+                if not created and candidate.status in {
+                    CandidateStatus.CLASSIFIED.value,
+                    CandidateStatus.DISCARDED.value,
+                }:
+                    continue
                 if not self.config.ai.enabled:
                     if created:
                         counters.pending_candidates += 1
@@ -300,6 +345,19 @@ class _BootstrapCounters:
 class _DiscoveryRunCounters(_BootstrapCounters):
     completed: bool = False
     limit_reached: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _FavoriteCheckResult:
+    checked: int
+    changed: int
+    completed: bool
+    skipped: bool
+
+
+def _log_warning(message: str, *, extra: dict[str, object]) -> None:
+    LOGGER.disabled = False
+    LOGGER.warning(message, extra=extra)
 
 
 def _is_confirmed_offer(result: ClassificationResult, threshold: float) -> bool:

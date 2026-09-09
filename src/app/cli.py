@@ -74,8 +74,11 @@ def _run(config: AppConfig, *, database: str | Path) -> int:
         f"discovery_topics={result.discovery_topics_seen} "
         f"discovery_candidates={result.discovery_candidates_seen} "
         f"discovery_completed={result.discovery_completed} "
+        f"discovery_limit_reached={result.discovery_limit_reached} "
         f"favorites_checked={result.favorites_checked} "
-        f"favorites_changed={result.favorites_changed}"
+        f"favorites_changed={result.favorites_changed} "
+        f"favorites_check_completed={result.favorites_check_completed} "
+        f"favorites_check_skipped={result.favorites_check_skipped}"
     )
     return 0
 
