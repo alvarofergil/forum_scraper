@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from app.config import AppConfig, load_config, load_email_environment
+from app.config import AppConfig, ConfigError, load_config, load_email_environment
+from app.models import EventType, utc_now
 from classification.openai_classifier import OpenAIClassifier
 from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
-from notifications.email import EmailNotificationService
+from notifications.email import EmailNotificationService, NotificationRetryResult
 from sources.armas_es.client import ArmasEsClient
 from sources.armas_es.listing_parser import parse_listing_page
 from sources.armas_es.topic_fetcher import ArmasEsTopicFetcher
@@ -33,8 +34,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    config_path = args.config or "config/config.yaml"
     config = (
-        load_config(args.config)
+        load_config(config_path)
         if args.command in {"bootstrap", "run", "retry-notifications", "debug-listing"}
         else None
     )
@@ -49,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         assert config is not None
         return _retry_notifications(config, database=args.database)
     if args.command == "status":
-        return _status(database=args.database)
+        return _status(database=args.database, config_path=args.config)
     if args.command == "favorites":
         return _favorites(database=args.database)
     if args.command == "inspect":
@@ -72,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app")
-    parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument("--config")
     parser.add_argument("--database", default="data/monitor.db")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -94,7 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
         favorite_action.add_argument("topic_id")
 
     backup = subparsers.add_parser("backup", help="create a consistent SQLite backup")
-    backup.add_argument("destination", nargs="?", default="backups/monitor.db")
+    backup.add_argument("destination", nargs="?")
 
     subparsers.add_parser("debug-listing", help="print parsed listing rows")
     return parser
@@ -122,6 +124,24 @@ def _run(config: AppConfig, *, database: str | Path) -> int:
     run_migrations(database)
     service = _discovery_service(config, database=database)
     result = service.run_once()
+    notification_summary = "notifications_skipped=email_disabled"
+    exit_code = 0
+    if config.notifications.email_enabled:
+        try:
+            notification_result = _send_notifications(config, database=database)
+        except ConfigError as exc:
+            notification_summary = (
+                "notifications_sent=0 notifications_failed=configuration_error "
+                "notifications_skipped=0"
+            )
+            print(f"notifications error: {exc}")
+            exit_code = 1
+        else:
+            notification_summary = (
+                f"notifications_sent={notification_result.sent} "
+                f"notifications_failed={notification_result.failed} "
+                f"notifications_skipped={notification_result.skipped}"
+            )
     print(
         "run completed: "
         f"discovery_pages={result.discovery_pages_seen} "
@@ -132,9 +152,10 @@ def _run(config: AppConfig, *, database: str | Path) -> int:
         f"favorites_checked={result.favorites_checked} "
         f"favorites_changed={result.favorites_changed} "
         f"favorites_check_completed={result.favorites_check_completed} "
-        f"favorites_check_skipped={result.favorites_check_skipped}"
+        f"favorites_check_skipped={result.favorites_check_skipped} "
+        f"{notification_summary}"
     )
-    return 0
+    return exit_code
 
 
 def _retry_notifications(config: AppConfig, *, database: str | Path) -> int:
@@ -159,12 +180,24 @@ def _retry_notifications(config: AppConfig, *, database: str | Path) -> int:
     return 0
 
 
-def _status(*, database: str | Path) -> int:
-    run_migrations(database)
+def _send_notifications(config: AppConfig, *, database: str | Path) -> NotificationRetryResult:
     engine = create_sqlite_engine(database)
     factory = session_factory(engine)
     with session_scope(factory) as session:
-        status = read_status(session)
+        return EmailNotificationService(
+            session=session,
+            email_environment=load_email_environment(),
+            notifications=config.notifications,
+        ).retry_pending_and_failed()
+
+
+def _status(*, database: str | Path, config_path: str | None) -> int:
+    run_migrations(database)
+    notify_event_types = _status_notify_event_types(config_path)
+    engine = create_sqlite_engine(database)
+    factory = session_factory(engine)
+    with session_scope(factory) as session:
+        status = read_status(session, notify_event_types=notify_event_types)
 
     print(
         "status: "
@@ -173,7 +206,9 @@ def _status(*, database: str | Path) -> int:
         f"inactive_favorites={status.inactive_favorites} "
         f"pending_candidates={status.pending_candidates} "
         f"events_pending={status.events_pending} events_failed={status.events_failed} "
-        f"events_sent={status.events_sent}"
+        f"events_sent={status.events_sent} "
+        f"events_pending_non_notifiable={status.events_pending_non_notifiable} "
+        f"events_failed_non_notifiable={status.events_failed_non_notifiable}"
     )
     for key, value in status.state:
         print(f"state: {key}={value}")
@@ -258,11 +293,34 @@ def _favorite_action(*, database: str | Path, action: str, topic_identifier: str
     return 0
 
 
-def _backup(*, database: str | Path, destination: str | Path) -> int:
+def _backup(*, database: str | Path, destination: str | Path | None) -> int:
     run_migrations(database)
-    backup_path = backup_sqlite_database(database, destination)
+    backup_path = backup_sqlite_database(
+        database,
+        destination if destination is not None else _default_backup_destination(),
+    )
     print(f"backup completed: {backup_path}")
     return 0
+
+
+def _status_notify_event_types(config_path: str | None) -> tuple[EventType, ...] | None:
+    if config_path is None:
+        return None
+    return load_config(config_path).notifications.notify_event_types
+
+
+def _default_backup_destination() -> Path:
+    timestamp = utc_now().strftime("%Y%m%d-%H%M%S")
+    base = Path("backups") / f"monitor-{timestamp}.db"
+    if not base.exists():
+        return base
+
+    suffix = 1
+    while True:
+        candidate = Path("backups") / f"monitor-{timestamp}-{suffix}.db"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def _discovery_service(config: AppConfig, *, database: str | Path) -> DiscoveryService:

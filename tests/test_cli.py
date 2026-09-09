@@ -5,14 +5,16 @@ from app.config import (
     AiConfig,
     AppConfig,
     BootstrapConfig,
+    ConfigError,
     DebugConfig,
     DiscoveryConfig,
+    EmailEnvironment,
     FavoritesConfig,
     NotificationsConfig,
     ScrapingConfig,
     SourceConfig,
 )
-from app.models import WatchItem
+from app.models import EventType, WatchItem
 from discovery.service import BootstrapResult, RunResult
 from notifications.email import NotificationRetryResult
 
@@ -57,7 +59,11 @@ class FakeEmailNotificationService:
         return NotificationRetryResult(sent=2, failed=1, skipped=3)
 
 
-def config() -> AppConfig:
+def config(
+    *,
+    email_enabled: bool = True,
+    notify_event_types: tuple[EventType, ...] | None = None,
+) -> AppConfig:
     return AppConfig(
         source=SourceConfig(type="armas_es", base_url="https://www.armas.es", forum_id=96),
         bootstrap=BootstrapConfig(pages=1),
@@ -65,7 +71,12 @@ def config() -> AppConfig:
         favorites=FavoritesConfig(),
         scraping=ScrapingConfig(request_delay_seconds=0),
         ai=AiConfig(enabled=False),
-        notifications=NotificationsConfig(),
+        notifications=NotificationsConfig(
+            email_enabled=email_enabled,
+            notify_event_types=notify_event_types
+            if notify_event_types is not None
+            else NotificationsConfig().notify_event_types,
+        ),
         debug=DebugConfig(),
         watchlist=(WatchItem(id="watch-001", brand="Acme", model="Target Pro"),),
     )
@@ -102,7 +113,12 @@ def test_bootstrap_cli_uses_force_and_prints_summary(
 
 
 def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> None:
-    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "load_config", lambda _path: config(email_enabled=False))
+    monkeypatch.setattr(
+        cli,
+        "load_email_environment",
+        lambda: (_ for _ in ()).throw(AssertionError("email env not required")),
+    )
     monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
     monkeypatch.setattr(cli, "_discovery_service", lambda _config, database: FakeDiscoveryService())
 
@@ -122,8 +138,71 @@ def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> No
         "run completed: discovery_pages=1 discovery_topics=2 discovery_candidates=1 "
         "discovery_completed=True discovery_limit_reached=False "
         "favorites_checked=1 favorites_changed=0 favorites_check_completed=True "
-        "favorites_check_skipped=False"
+        "favorites_check_skipped=False notifications_skipped=email_disabled"
     ) in output
+
+
+def test_run_cli_sends_configured_notifications(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda _path: config(email_enabled=True))
+    monkeypatch.setattr(
+        cli,
+        "load_email_environment",
+        lambda: EmailEnvironment(
+            smtp_host="smtp.example.test",
+            smtp_port=587,
+            smtp_user="sender@example.test",
+            smtp_password="env-secret",
+            notification_email="recipient@example.test",
+        ),
+    )
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(cli, "_discovery_service", lambda _config, database: FakeDiscoveryService())
+    monkeypatch.setattr(cli, "create_sqlite_engine", lambda _database: object())
+    monkeypatch.setattr(cli, "session_factory", lambda _engine: _SessionFactory())
+    monkeypatch.setattr(cli, "EmailNotificationService", FakeEmailNotificationService)
+
+    exit_code = cli.main(
+        [
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--database",
+            str(tmp_path / "monitor.db"),
+            "run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "notifications_sent=2 notifications_failed=1 notifications_skipped=3" in output
+    assert "env-secret" not in output
+
+
+def test_run_cli_reports_missing_smtp_environment(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda _path: config(email_enabled=True))
+    monkeypatch.setattr(
+        cli,
+        "load_email_environment",
+        lambda: (_ for _ in ()).throw(ConfigError("missing environment variable: SMTP_HOST")),
+    )
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(cli, "_discovery_service", lambda _config, database: FakeDiscoveryService())
+
+    exit_code = cli.main(
+        [
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--database",
+            str(tmp_path / "monitor.db"),
+            "run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "notifications_sent=0 notifications_failed=configuration_error" in output
+    assert "SMTP_HOST" in output
+    assert "SMTP_PASSWORD" not in output
+    assert "env-secret" not in output
 
 
 def test_retry_notifications_cli_prints_delivery_summary(monkeypatch, capsys, tmp_path) -> None:

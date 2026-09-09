@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic.config import Config
@@ -13,6 +14,7 @@ from app.config import (
     BootstrapConfig,
     DebugConfig,
     DiscoveryConfig,
+    EmailEnvironment,
     FavoritesConfig,
     NotificationsConfig,
     ScrapingConfig,
@@ -20,8 +22,9 @@ from app.config import (
 )
 from app.models import AvailabilityStatus, EventType, NotificationStatus, WatchItem
 from events.service import EventService
+from notifications.email import EmailNotificationService
 from storage import create_sqlite_engine, session_factory, session_scope
-from storage.orm import FavoriteORM, TopicORM
+from storage.orm import EventORM, FavoriteORM, TopicORM
 
 
 def migrated_db_path(tmp_path: Path) -> Path:
@@ -47,8 +50,58 @@ def config() -> AppConfig:
     )
 
 
+def notifications_config(*event_types: EventType) -> AppConfig:
+    base = config()
+    return AppConfig(
+        source=base.source,
+        bootstrap=base.bootstrap,
+        discovery=base.discovery,
+        favorites=base.favorites,
+        scraping=base.scraping,
+        ai=base.ai,
+        notifications=NotificationsConfig(notify_event_types=event_types),
+        debug=base.debug,
+        watchlist=base.watchlist,
+    )
+
+
 def fail_load_config(_path: str) -> AppConfig:
     raise AssertionError("config not required")
+
+
+class FakeSMTP:
+    sent_messages: list[str] = []
+    fail_send: bool = False
+
+    def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+        self.timeout = timeout
+
+    def __enter__(self) -> FakeSMTP:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def starttls(self) -> None:
+        return None
+
+    def login(self, _user: str, _password: str) -> None:
+        return None
+
+    def sendmail(self, _sender: str, _recipients: list[str], message: str) -> None:
+        if self.fail_send:
+            raise OSError("smtp unavailable")
+        self.sent_messages.append(message)
+
+
+def email_environment() -> EmailEnvironment:
+    return EmailEnvironment(
+        smtp_host="smtp.example.test",
+        smtp_port=587,
+        smtp_user="sender@example.test",
+        smtp_password="env-secret",
+        notification_email="recipient@example.test",
+    )
 
 
 def seed_operational_db(db_path: Path) -> None:
@@ -85,6 +138,32 @@ def seed_operational_db(db_path: Path) -> None:
         )
 
 
+class FakeRunDiscoveryService:
+    def run_once(self):  # type: ignore[no-untyped-def]
+        from discovery.service import RunResult
+
+        return RunResult(
+            discovery_pages_seen=0,
+            discovery_topics_seen=0,
+            discovery_candidates_seen=0,
+            discovery_completed=True,
+            discovery_limit_reached=False,
+            favorites_checked=0,
+            favorites_changed=0,
+            favorites_check_completed=True,
+            favorites_check_skipped=False,
+        )
+
+
+def fake_email_service(**kwargs: object) -> EmailNotificationService:
+    return EmailNotificationService(
+        session=kwargs["session"],
+        email_environment=kwargs["email_environment"],
+        notifications=kwargs["notifications"],
+        smtp_factory=FakeSMTP,
+    )
+
+
 def test_status_cli_prints_database_summary(monkeypatch, capsys, tmp_path: Path) -> None:
     db_path = migrated_db_path(tmp_path)
     seed_operational_db(db_path)
@@ -97,6 +176,95 @@ def test_status_cli_prints_database_summary(monkeypatch, capsys, tmp_path: Path)
     assert exit_code == 0
     assert "status: topics=1 favorites=1 active_favorites=1 inactive_favorites=0" in output
     assert "events_pending=1 events_failed=0 events_sent=0" in output
+
+
+def test_status_cli_counts_only_configured_pending_events_as_actionable(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    db_path = migrated_db_path(tmp_path)
+    seed_operational_db(db_path)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda _path: notifications_config(EventType.PRICE_CHANGED),
+    )
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+
+    exit_code = cli.main(
+        ["--config", str(tmp_path / "config.yaml"), "--database", str(db_path), "status"]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "events_pending=0" in output
+    assert "events_pending_non_notifiable=1" in output
+
+
+def test_run_cli_sends_pending_events_with_fake_smtp(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    FakeSMTP.sent_messages = []
+    FakeSMTP.fail_send = False
+    db_path = migrated_db_path(tmp_path)
+    seed_operational_db(db_path)
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "load_email_environment", email_environment)
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(
+        cli,
+        "_discovery_service",
+        lambda _config, database: FakeRunDiscoveryService(),
+    )
+    monkeypatch.setattr(cli, "EmailNotificationService", fake_email_service)
+
+    exit_code = cli.main(["--database", str(db_path), "run"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "notifications_sent=1 notifications_failed=0 notifications_skipped=0" in output
+    assert "env-secret" not in output
+    with session_scope(session_factory(create_sqlite_engine(db_path))) as session:
+        event = session.query(EventORM).one()
+        assert event.notification_status == NotificationStatus.SENT.value
+        assert event.notified_at is not None
+        assert event.error_message is None
+    assert len(FakeSMTP.sent_messages) == 1
+
+
+def test_run_cli_leaves_smtp_failures_retryable(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    FakeSMTP.sent_messages = []
+    FakeSMTP.fail_send = True
+    db_path = migrated_db_path(tmp_path)
+    seed_operational_db(db_path)
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "load_email_environment", email_environment)
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(
+        cli,
+        "_discovery_service",
+        lambda _config, database: FakeRunDiscoveryService(),
+    )
+    monkeypatch.setattr(cli, "EmailNotificationService", fake_email_service)
+
+    exit_code = cli.main(["--database", str(db_path), "run"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "notifications_sent=0 notifications_failed=1 notifications_skipped=0" in output
+    assert "smtp unavailable" not in output
+    with session_scope(session_factory(create_sqlite_engine(db_path))) as session:
+        event = session.query(EventORM).one()
+        assert event.notification_status == NotificationStatus.FAILED.value
+        assert event.notified_at is None
+        assert event.error_message == "smtp unavailable"
 
 
 def test_favorites_cli_lists_favorites(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -227,3 +395,59 @@ def test_backup_cli_creates_consistent_sqlite_copy(monkeypatch, capsys, tmp_path
         favorite_count = connection.execute("SELECT count(*) FROM favorites").fetchone()[0]
     assert topic_count == 1
     assert favorite_count == 1
+
+
+def test_backup_cli_without_destination_uses_timestamped_default(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    db_path = migrated_db_path(tmp_path)
+    seed_operational_db(db_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(
+        cli,
+        "utc_now",
+        lambda: datetime(2026, 9, 9, 12, 34, 56, tzinfo=UTC),
+    )
+
+    exit_code = cli.main(["--database", str(db_path), "backup"])
+
+    backup_path = tmp_path / "backups" / "monitor-20260909-123456.db"
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "backup completed: backups/monitor-20260909-123456.db" in output
+    assert backup_path.exists()
+    assert not (tmp_path / "backups" / "monitor.db").exists()
+
+
+def test_backup_cli_without_destination_does_not_overwrite_same_second(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    db_path = migrated_db_path(tmp_path)
+    seed_operational_db(db_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(
+        cli,
+        "utc_now",
+        lambda: datetime(2026, 9, 9, 12, 34, 56, tzinfo=UTC),
+    )
+
+    first = cli.main(["--database", str(db_path), "backup"])
+    second = cli.main(["--database", str(db_path), "backup"])
+
+    output = capsys.readouterr().out
+    first_path = tmp_path / "backups" / "monitor-20260909-123456.db"
+    second_path = tmp_path / "backups" / "monitor-20260909-123456-1.db"
+    assert first == 0
+    assert second == 0
+    assert "backup completed: backups/monitor-20260909-123456.db" in output
+    assert "backup completed: backups/monitor-20260909-123456-1.db" in output
+    assert first_path.exists()
+    assert second_path.exists()
