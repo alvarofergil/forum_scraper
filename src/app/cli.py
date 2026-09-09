@@ -23,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "bootstrap":
         return _bootstrap(config, database=args.database, force=args.force)
+    if args.command == "run":
+        return _run(config, database=args.database)
     if args.command == "debug-listing":
         return _debug_listing(config)
 
@@ -39,30 +41,14 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser("bootstrap")
     bootstrap.add_argument("--force", action="store_true")
 
+    subparsers.add_parser("run")
     subparsers.add_parser("debug-listing")
     return parser
 
 
 def _bootstrap(config: AppConfig, *, database: str | Path, force: bool) -> int:
     run_migrations(database)
-    engine = create_sqlite_engine(database)
-    factory = session_factory(engine)
-    client = ArmasEsClient.from_scraping_config(
-        config.scraping,
-        base_url=config.source.base_url,
-        forum_id=config.source.forum_id,
-    )
-    service = DiscoveryService(
-        config=config,
-        session_factory=factory,
-        listing_client=client,
-        topic_fetcher=ArmasEsTopicFetcher(
-            client=client,
-            base_url=config.source.base_url,
-            forum_id=config.source.forum_id,
-        ),
-        classifier=OpenAIClassifier.from_config(config.ai) if config.ai.enabled else None,
-    )
+    service = _discovery_service(config, database=database)
     try:
         result = service.bootstrap(force=force)
     except BootstrapAlreadyCompletedError as exc:
@@ -76,6 +62,43 @@ def _bootstrap(config: AppConfig, *, database: str | Path, force: bool) -> int:
         f"pending={result.pending_candidates}"
     )
     return 0
+
+
+def _run(config: AppConfig, *, database: str | Path) -> int:
+    run_migrations(database)
+    service = _discovery_service(config, database=database)
+    result = service.run_once()
+    print(
+        "run completed: "
+        f"discovery_pages={result.discovery_pages_seen} "
+        f"discovery_topics={result.discovery_topics_seen} "
+        f"discovery_candidates={result.discovery_candidates_seen} "
+        f"discovery_completed={result.discovery_completed} "
+        f"favorites_checked={result.favorites_checked} "
+        f"favorites_changed={result.favorites_changed}"
+    )
+    return 0
+
+
+def _discovery_service(config: AppConfig, *, database: str | Path) -> DiscoveryService:
+    engine = create_sqlite_engine(database)
+    factory = session_factory(engine)
+    client = ArmasEsClient.from_scraping_config(
+        config.scraping,
+        base_url=config.source.base_url,
+        forum_id=config.source.forum_id,
+    )
+    return DiscoveryService(
+        config=config,
+        session_factory=factory,
+        listing_client=client,
+        topic_fetcher=ArmasEsTopicFetcher(
+            client=client,
+            base_url=config.source.base_url,
+            forum_id=config.source.forum_id,
+        ),
+        classifier=OpenAIClassifier.from_config(config.ai) if config.ai.enabled else None,
+    )
 
 
 def _debug_listing(config: AppConfig) -> int:

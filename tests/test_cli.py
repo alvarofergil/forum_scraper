@@ -13,7 +13,7 @@ from app.config import (
     SourceConfig,
 )
 from app.models import WatchItem
-from discovery.service import BootstrapResult
+from discovery.service import BootstrapResult, RunResult
 
 
 class FakeDiscoveryService:
@@ -32,6 +32,17 @@ class FakeDiscoveryService:
             classified_candidates=1,
             discarded_candidates=0,
             favorites_created=1,
+        )
+
+    def run_once(self) -> RunResult:
+        return RunResult(
+            discovery_pages_seen=1,
+            discovery_topics_seen=2,
+            discovery_candidates_seen=1,
+            discovery_completed=True,
+            discovery_limit_reached=False,
+            favorites_checked=1,
+            favorites_changed=0,
         )
 
 
@@ -77,6 +88,29 @@ def test_bootstrap_cli_uses_force_and_prints_summary(
     assert exit_code == 0
     assert FakeDiscoveryService.last_force is True
     assert "bootstrap completed: pages=1 topics=2 candidates=1 favorites=1 pending=0" in output
+
+
+def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(cli, "_discovery_service", lambda _config, database: FakeDiscoveryService())
+
+    exit_code = cli.main(
+        [
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--database",
+            str(tmp_path / "monitor.db"),
+            "run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert (
+        "run completed: discovery_pages=1 discovery_topics=2 discovery_candidates=1 "
+        "discovery_completed=True favorites_checked=1 favorites_changed=0"
+    ) in output
 
 
 class _FakeClientFactory:
