@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from app.config import AppConfig, load_config
+from app.config import AppConfig, load_config, load_email_environment
 from classification.openai_classifier import OpenAIClassifier
 from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
+from notifications.email import EmailNotificationService
 from sources.armas_es.client import ArmasEsClient
 from sources.armas_es.listing_parser import parse_listing_page
 from sources.armas_es.topic_fetcher import ArmasEsTopicFetcher
-from storage import create_sqlite_engine, run_migrations, session_factory
+from storage import create_sqlite_engine, run_migrations, session_factory, session_scope
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
         return _bootstrap(config, database=args.database, force=args.force)
     if args.command == "run":
         return _run(config, database=args.database)
+    if args.command == "retry-notifications":
+        return _retry_notifications(config, database=args.database)
     if args.command == "debug-listing":
         return _debug_listing(config)
 
@@ -42,6 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--force", action="store_true")
 
     subparsers.add_parser("run")
+    subparsers.add_parser("retry-notifications")
     subparsers.add_parser("debug-listing")
     return parser
 
@@ -79,6 +83,28 @@ def _run(config: AppConfig, *, database: str | Path) -> int:
         f"favorites_changed={result.favorites_changed} "
         f"favorites_check_completed={result.favorites_check_completed} "
         f"favorites_check_skipped={result.favorites_check_skipped}"
+    )
+    return 0
+
+
+def _retry_notifications(config: AppConfig, *, database: str | Path) -> int:
+    if not config.notifications.email_enabled:
+        print("retry-notifications skipped: email_enabled=False")
+        return 0
+
+    run_migrations(database)
+    engine = create_sqlite_engine(database)
+    factory = session_factory(engine)
+    with session_scope(factory) as session:
+        result = EmailNotificationService(
+            session=session,
+            email_environment=load_email_environment(),
+            notifications=config.notifications,
+        ).retry_pending_and_failed()
+
+    print(
+        "retry-notifications completed: "
+        f"sent={result.sent} failed={result.failed} skipped={result.skipped}"
     )
     return 0
 

@@ -14,6 +14,7 @@ from app.config import (
 )
 from app.models import WatchItem
 from discovery.service import BootstrapResult, RunResult
+from notifications.email import NotificationRetryResult
 
 
 class FakeDiscoveryService:
@@ -46,6 +47,14 @@ class FakeDiscoveryService:
             favorites_check_completed=True,
             favorites_check_skipped=False,
         )
+
+
+class FakeEmailNotificationService:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def retry_pending_and_failed(self) -> NotificationRetryResult:
+        return NotificationRetryResult(sent=2, failed=1, skipped=3)
 
 
 def config() -> AppConfig:
@@ -117,7 +126,46 @@ def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> No
     ) in output
 
 
+def test_retry_notifications_cli_prints_delivery_summary(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda _path: config())
+    monkeypatch.setattr(cli, "load_email_environment", lambda: object())
+    monkeypatch.setattr(cli, "run_migrations", lambda _database: None)
+    monkeypatch.setattr(cli, "create_sqlite_engine", lambda _database: object())
+    monkeypatch.setattr(cli, "session_factory", lambda _engine: _SessionFactory())
+    monkeypatch.setattr(cli, "EmailNotificationService", FakeEmailNotificationService)
+
+    exit_code = cli.main(
+        [
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--database",
+            str(tmp_path / "monitor.db"),
+            "retry-notifications",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "retry-notifications completed: sent=2 failed=1 skipped=3" in output
+
+
 class _FakeClientFactory:
     @classmethod
     def from_scraping_config(cls, *_args: object, **_kwargs: object) -> object:
         return object()
+
+
+class _SessionFactory:
+    def __call__(self) -> _FakeSession:
+        return _FakeSession()
+
+
+class _FakeSession:
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
