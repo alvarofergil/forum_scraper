@@ -1,6 +1,6 @@
 # TASK-025 - Correctivo Post HITO-06: Recuperacion De Pendientes Y Arranque Operativo
 
-Estado: `TODO`  
+Estado: `DONE`
 SPEC maestra: [../forum_scraper.md](../forum_scraper.md)  
 Documento maestro: [../forum_scraper_tasks.md](../forum_scraper_tasks.md)
 
