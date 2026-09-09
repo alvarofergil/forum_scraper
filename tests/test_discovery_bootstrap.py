@@ -31,7 +31,7 @@ from classification.fake import FakeClassifier
 from discovery.service import BootstrapAlreadyCompletedError, DiscoveryService
 from sources.armas_es.client import ArmasHttpResponse
 from storage import create_sqlite_engine, session_factory, session_scope
-from storage.orm import CandidateMatchORM, FavoriteORM, PriceHistoryORM, TopicORM
+from storage.orm import CandidateMatchORM, EventORM, FavoriteORM, PriceHistoryORM, TopicORM
 from storage.repositories import AppStateRepository
 
 
@@ -80,11 +80,16 @@ def app_config(
     pages: int = 10,
     ai_enabled: bool = True,
     threshold: float = 0.85,
+    overlap_minutes: int = 30,
+    max_pages_per_run: int = 50,
 ) -> AppConfig:
     return AppConfig(
         source=SourceConfig(type="armas_es", base_url="https://www.armas.es", forum_id=96),
         bootstrap=BootstrapConfig(pages=pages),
-        discovery=DiscoveryConfig(),
+        discovery=DiscoveryConfig(
+            overlap_minutes=overlap_minutes,
+            max_pages_per_run=max_pages_per_run,
+        ),
         favorites=FavoritesConfig(),
         scraping=ScrapingConfig(request_delay_seconds=0),
         ai=AiConfig(enabled=ai_enabled, match_confidence_threshold=threshold, model="test-model"),
@@ -98,6 +103,7 @@ def listing(
     external_topic_id: str,
     *,
     title: str = "Vendo Acme Target Pro",
+    last_activity_at: datetime | None = None,
 ) -> TopicListing:
     return TopicListing(
         external_topic_id=external_topic_id,
@@ -105,6 +111,7 @@ def listing(
         title=title,
         snippet="Oferta revisada",
         author="seller",
+        last_activity_at=last_activity_at,
     )
 
 
@@ -158,7 +165,8 @@ def parser_for_pages(pages: dict[int, tuple[TopicListing, ...]]):
     ):
         from sources.armas_es.listing_parser import ParsedListingPage
 
-        return ParsedListingPage(topics=pages.get(current_start, ()))
+        next_url = f"https://www.armas.es/foros/viewforum.php?f=96&start={current_start + 18}"
+        return ParsedListingPage(topics=pages.get(current_start, ()), next_page_url=next_url)
 
     return parse_listing_page
 
@@ -291,3 +299,130 @@ def test_force_allows_new_pass_without_deleting_history(tmp_path: Path) -> None:
         assert session.query(PriceHistoryORM).count() == 1
         assert session.query(TopicORM).count() == 1
         assert AppStateRepository(session).get("bootstrap_completed_at") is not None
+
+
+def test_run_uses_overlap_and_stops_after_cutoff(tmp_path: Path) -> None:
+    service, listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(overlap_minutes=30),
+        pages={
+            0: (
+                listing(
+                    "100",
+                    last_activity_at=datetime(2026, 1, 2, 11, 45, tzinfo=UTC),
+                ),
+            ),
+            18: (
+                listing(
+                    "200",
+                    last_activity_at=datetime(2026, 1, 2, 11, 20, tzinfo=UTC),
+                ),
+            ),
+        },
+    )
+    previous_checkpoint = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
+
+    with session_scope(service.session_factory) as session:
+        AppStateRepository(session).set(
+            "last_successful_discovery_at",
+            previous_checkpoint.isoformat().replace("+00:00", "Z"),
+        )
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert listing_client.starts == [0, 18]
+        assert result.discovery_completed is True
+        assert result.discovery_topics_seen == 2
+        assert session.query(FavoriteORM).count() == 1
+        assert session.query(TopicORM).filter_by(external_topic_id="200").count() == 0
+        assert (
+            AppStateRepository(session).get("last_successful_discovery_at")
+            != previous_checkpoint.isoformat().replace("+00:00", "Z")
+        )
+
+
+def test_run_safety_limit_prevents_false_discovery_checkpoint(tmp_path: Path) -> None:
+    service, listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=2),
+        pages={
+            0: (listing("100", last_activity_at=datetime(2026, 1, 2, 12, 0, tzinfo=UTC)),),
+            18: (listing("200", last_activity_at=datetime(2026, 1, 2, 11, 59, tzinfo=UTC)),),
+        },
+    )
+    previous_checkpoint = datetime(2026, 1, 2, 10, 0, tzinfo=UTC)
+
+    with session_scope(service.session_factory) as session:
+        AppStateRepository(session).set(
+            "last_successful_discovery_at",
+            previous_checkpoint.isoformat().replace("+00:00", "Z"),
+        )
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert listing_client.starts == [0, 18]
+        assert result.discovery_completed is False
+        assert result.discovery_limit_reached is True
+        assert (
+            AppStateRepository(session).get("last_successful_discovery_at")
+            == previous_checkpoint.isoformat().replace("+00:00", "Z")
+        )
+
+
+def test_run_does_not_fetch_complete_topic_for_non_candidate_listing(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={
+            0: (
+                listing(
+                    "100",
+                    title="Conversacion general",
+                    last_activity_at=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
+                ),
+            )
+        },
+    )
+
+    service.run_once()
+
+    assert topic_fetcher.calls == []
+
+
+def test_run_checks_old_favorite_even_when_absent_from_listing(tmp_path: Path) -> None:
+    service, _listing_client, topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+    service.bootstrap(force=True)
+    service.listing_parser = parser_for_pages({})
+    topic_fetcher.calls.clear()
+
+    result = service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert result.favorites_checked == 1
+        assert topic_fetcher.calls == [
+            ("100", "https://www.armas.es/foros/viewtopic.php?f=96&t=100")
+        ]
+        assert AppStateRepository(session).get("last_successful_favorites_check_at") is not None
+
+
+def test_two_runs_without_changes_do_not_duplicate_events(tmp_path: Path) -> None:
+    service, _listing_client, _topic_fetcher = service_for(
+        tmp_path,
+        config=app_config(max_pages_per_run=1),
+        pages={0: (listing("100"),)},
+        classifier=FakeClassifier(default_result=positive_result()),
+    )
+
+    service.run_once()
+    service.run_once()
+
+    with session_scope(service.session_factory) as session:
+        assert session.query(FavoriteORM).count() == 1
+        assert session.query(EventORM).count() == 1
