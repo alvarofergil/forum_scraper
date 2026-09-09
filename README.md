@@ -10,7 +10,7 @@ por email.
 
 ## Estado Actual
 
-Proyecto en fase inicial, con el nucleo tecnico de HITO-01 completado y endurecido.
+Proyecto v1 listo para operacion local y despliegue portable con Docker.
 
 Ya existe:
 
@@ -24,10 +24,7 @@ Ya existe:
 - URLs canonicas y cliente HTTP secuencial para `armas_es`;
 - persistencia UTC, eventos/candidatos idempotentes y tests sin red;
 - pytest y Ruff configurados;
-- cobertura unitaria de la base tecnica.
-
-Los parsers HTML, discovery, favoritos de negocio, clasificacion, notificaciones y Docker se
-implementaran por tareas incrementales siguiendo las SPECs del proyecto.
+- empaquetado Docker local con volumenes portables.
 
 ## Principios
 
@@ -140,10 +137,71 @@ Archivos previstos:
 - `config/config.example.yaml`: ejemplo versionado.
 - `config/config.yaml`: configuracion local del usuario, ignorada por Git.
 - `.env`: secrets locales, ignorado por Git.
-- `.env.example`: ejemplo versionado cuando se implemente Docker/notificaciones.
+- `.env.example`: nombres de variables versionados sin secretos.
 
 Las credenciales SMTP y cualquier API key deben venir de variables de entorno, nunca de YAML,
 SQLite, tests o fixtures.
+
+Preparacion minima:
+
+```bash
+cp config/config.example.yaml config/config.yaml
+cp .env.example .env
+```
+
+Edita `config/config.yaml` con tu watchlist. Si `notifications.email_enabled=true`, rellena
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` y `NOTIFICATION_EMAIL` en `.env`.
+Si `ai.enabled=true` y usas el clasificador OpenAI, rellena `OPENAI_API_KEY`.
+
+## Docker
+
+El despliegue Docker usa los mismos directorios portables que la ejecucion local:
+
+- `config/`: configuracion YAML local.
+- `data/`: base SQLite operativa.
+- `backups/`: copias generadas por `python -m app backup`.
+- `.env`: secretos locales cargados por Docker Compose.
+
+Docker Compose monta `config/` como solo lectura dentro del contenedor y mantiene `data/` y
+`backups/` con escritura para conservar SQLite y copias entre recreaciones.
+
+Construir la imagen local:
+
+```bash
+docker compose build
+```
+
+Ejecutar una pasada normal:
+
+```bash
+docker compose run --rm forum-scraper run
+```
+
+Otros comandos operativos:
+
+```bash
+docker compose run --rm forum-scraper bootstrap
+docker compose run --rm forum-scraper status
+docker compose run --rm forum-scraper retry-notifications
+docker compose run --rm forum-scraper backup
+```
+
+La imagen parte de `python:3.12-slim` y no fija una arquitectura concreta, por lo que puede
+construirse localmente en `linux/amd64` o `linux/arm64` segun la maquina donde se ejecute
+Docker.
+
+## Migracion PC -> Raspberry
+
+1. Ejecuta `python -m app backup` o `docker compose run --rm forum-scraper backup` en el PC.
+2. Copia al mismo directorio del proyecto en la Raspberry: `config/`, `data/`, `backups/` y
+   `.env`.
+3. En la Raspberry, ejecuta `docker compose build`.
+4. Comprueba estado con `docker compose run --rm forum-scraper status`.
+5. Ejecuta una pasada con `docker compose run --rm forum-scraper run`.
+
+No hace falta copiar `.venv`, caches de Python ni artefactos de build. La base de datos vive
+en `data/monitor.db` y las migraciones se aplican automaticamente al ejecutar comandos que
+abren la base.
 
 ## Flujo De Trabajo
 
