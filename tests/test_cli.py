@@ -44,8 +44,16 @@ class FakeDiscoveryService:
             discovery_candidates_seen=1,
             discovery_completed=True,
             discovery_limit_reached=False,
+            pending_candidates_checked=0,
+            pending_candidates_classified=0,
+            pending_candidates_discarded=0,
+            pending_candidates_failed=0,
+            pending_candidates_remaining=0,
+            pending_candidates_completed=True,
+            pending_candidates_skipped=False,
             favorites_checked=1,
             favorites_changed=0,
+            favorites_check_errors=0,
             favorites_check_completed=True,
             favorites_check_skipped=False,
         )
@@ -137,7 +145,10 @@ def test_run_cli_prints_single_pass_summary(monkeypatch, capsys, tmp_path) -> No
     assert (
         "run completed: discovery_pages=1 discovery_topics=2 discovery_candidates=1 "
         "discovery_completed=True discovery_limit_reached=False "
-        "favorites_checked=1 favorites_changed=0 favorites_check_completed=True "
+        "pending_checked=0 pending_classified=0 pending_discarded=0 "
+        "pending_failed=0 pending_remaining=0 pending_completed=True "
+        "pending_skipped=False favorites_checked=1 favorites_changed=0 "
+        "favorites_check_errors=0 favorites_check_completed=True "
         "favorites_check_skipped=False notifications_skipped=email_disabled"
     ) in output
 

@@ -148,8 +148,16 @@ class FakeRunDiscoveryService:
             discovery_candidates_seen=0,
             discovery_completed=True,
             discovery_limit_reached=False,
+            pending_candidates_checked=2,
+            pending_candidates_classified=1,
+            pending_candidates_discarded=0,
+            pending_candidates_failed=1,
+            pending_candidates_remaining=1,
+            pending_candidates_completed=False,
+            pending_candidates_skipped=False,
             favorites_checked=0,
             favorites_changed=0,
+            favorites_check_errors=1,
             favorites_check_completed=True,
             favorites_check_skipped=False,
         )
@@ -225,6 +233,9 @@ def test_run_cli_sends_pending_events_with_fake_smtp(
 
     output = capsys.readouterr().out
     assert exit_code == 0
+    assert "pending_checked=2 pending_classified=1" in output
+    assert "pending_failed=1 pending_remaining=1 pending_completed=False" in output
+    assert "favorites_check_errors=1" in output
     assert "notifications_sent=1 notifications_failed=0 notifications_skipped=0" in output
     assert "env-secret" not in output
     with session_scope(session_factory(create_sqlite_engine(db_path))) as session:

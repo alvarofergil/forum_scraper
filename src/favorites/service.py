@@ -81,6 +81,7 @@ class FavoriteService:
         self.config = config or FavoritesConfig()
         self.ai_config = ai_config or AiConfig()
         self.events = events or EventService(session)
+        self.last_check_had_error = False
 
     def create_from_classification(
         self,
@@ -145,6 +146,7 @@ class FavoriteService:
     def check_favorite(self, favorite_id: int, *, watch_item: WatchItem) -> bool:
         """Fetch and classify a favorite only when its stable content hash changed."""
 
+        self.last_check_had_error = False
         favorite = self.session.get(FavoriteORM, favorite_id)
         if favorite is None or favorite.topic is None or not favorite.is_active:
             return False
@@ -175,7 +177,21 @@ class FavoriteService:
             currency=favorite.currency,
             content_hash=favorite.last_content_hash,
         )
-        result = self.classifier.classify_favorite_update(previous, watch_item, parsed_topic)
+        try:
+            result = self.classifier.classify_favorite_update(previous, watch_item, parsed_topic)
+        except Exception as exc:
+            self.last_check_had_error = True
+            _emit_error(
+                self.events,
+                topic_external_id=favorite.topic.external_topic_id,
+                topic_id=favorite.topic_id,
+                favorite_id=favorite.id,
+                watch_item_id=watch_item.id,
+                scope="favorite_update_classification",
+                content_hash=content_hash,
+                error=exc,
+            )
+            return False
         self._apply_classification_update(favorite, parsed_topic, result, content_hash)
         return True
 
@@ -347,3 +363,40 @@ def _price_decimal(value: float | None) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
+def _emit_error(
+    events: EventService,
+    *,
+    topic_external_id: str,
+    topic_id: int | None,
+    favorite_id: int | None,
+    watch_item_id: str,
+    scope: str,
+    content_hash: str,
+    error: Exception,
+) -> None:
+    events.emit(
+        event_type=EventType.ERROR,
+        deduplication_key=(
+            f"topic:{topic_external_id}|watch:{watch_item_id}|event:ERROR|"
+            f"scope:{scope}|hash:{content_hash}|error:{type(error).__name__}"
+        ),
+        topic_id=topic_id,
+        favorite_id=favorite_id,
+        watch_item_id=watch_item_id,
+        payload={
+            "topic_external_id": topic_external_id,
+            "watch_item_id": watch_item_id,
+            "scope": scope,
+            "error_type": type(error).__name__,
+        },
+        error_message=_safe_error_message(error),
+    )
+
+
+def _safe_error_message(error: Exception) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for marker in ("OPENAI_API_KEY", "Authorization", "Cookie", "password", "token"):
+        message = message.replace(marker, "[redacted]")
+    return message[:1000]

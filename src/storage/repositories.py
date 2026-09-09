@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import CandidateStatus, EventType, NotificationStatus, TopicListing, utc_now
@@ -95,6 +95,30 @@ class CandidateMatchRepository:
         )
         self.session.flush()
         return candidate, True
+
+    def list_pending(self, *, limit: int) -> tuple[CandidateMatchORM, ...]:
+        """Return a bounded batch of pending candidates with stable ordering."""
+
+        stmt = (
+            select(CandidateMatchORM)
+            .join(TopicORM, CandidateMatchORM.topic_id == TopicORM.id)
+            .where(CandidateMatchORM.status == CandidateStatus.PENDING.value)
+            .order_by(CandidateMatchORM.matched_at, CandidateMatchORM.id)
+            .limit(limit)
+        )
+        return tuple(self.session.scalars(stmt))
+
+    def count_pending(self) -> int:
+        """Return how many candidates are still waiting for classification."""
+
+        return int(
+            self.session.scalar(
+                select(func.count())
+                .select_from(CandidateMatchORM)
+                .where(CandidateMatchORM.status == CandidateStatus.PENDING.value)
+            )
+            or 0
+        )
 
     def mark_classified(
         self,
